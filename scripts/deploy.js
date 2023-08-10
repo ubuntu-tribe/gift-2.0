@@ -19,7 +19,7 @@ async function main() {
     contract: "contracts/Access.sol:Access",
   });
 
-  // Cand be commented and deployed separately after the PoR is created
+  // Can be commented and deployed separately after the PoR is created
   const porAddress = '0x0000000000000000000000000000000000000000'
   const ReserveConsumerV3 = await ethers.getContractFactory("ReserveConsumerV3");
   const reserveConsumerV3 = await upgrades.deployProxy(ReserveConsumerV3, [porAddress]);
@@ -29,9 +29,9 @@ async function main() {
     ethers.provider,
     reserveConsumerV3.address
   );
-  
+
   console.log(`reserveConsumerV3 deployed to: ${ reserveConsumerV3.address } => ${ reserveConsumerV3Impl }`);
-  
+
   await run("verify:verify", {
     address: reserveConsumerV3Impl,
     contract: "contracts/por/ReserveConsumerV3.sol:ReserveConsumerV3",
@@ -42,6 +42,7 @@ async function main() {
     [
       access.address,
       porAddress == '0x0000000000000000000000000000000000000000' ? '0x0000000000000000000000000000000000000000' :reserveConsumerV3.address,
+      signers[0].address,
     ]
   );
   await gift.deployed();
