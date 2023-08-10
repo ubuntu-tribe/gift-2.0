@@ -11,7 +11,8 @@ nvm use 18.17.0
 ```
 
 ```sh
-
+yarn install
+npm install web3-utils
 npx hardhat help
 npx hardhat test
 npx hardhat test test/gift_zero_consumer_init_supply.js
