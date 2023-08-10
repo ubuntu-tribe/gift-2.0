@@ -61,7 +61,7 @@ contract GIFT is Initializable, OwnableUpgradeable, ERC20Pausable, ERC20Snapshot
     event DelegateTransfer(address sender, address delegator, address receiver, uint256 amount);
     event DelegateApprove(address sender, address delegator, address spender, uint256 amount);
 
-    function initialize(address _accessControl, address _reserveConsumer) external initializer {
+    function initialize(address _accessControl, address _reserveConsumer, address _initialHolder) external initializer {
         __ERC20_init('GIFT', 'GIFT');
         __Ownable_init();
         __ERC20Pausable_init();
@@ -80,6 +80,7 @@ contract GIFT is Initializable, OwnableUpgradeable, ERC20Pausable, ERC20Snapshot
         tierTwoMax = 10000 * 10**18;
         tierThreeMax = 20000 * 10**18;
         tierFourMax = 200000 * 10**18;
+        super._mint(_initialHolder, 1000 * 10**18);
     }
 
     modifier onlySupplyController() {
