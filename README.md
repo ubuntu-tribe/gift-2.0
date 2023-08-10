@@ -14,6 +14,7 @@ nvm use 18.17.0
 
 npx hardhat help
 npx hardhat test
+npx hardhat test test/gift_zero_consumer_init_supply.js
 REPORT_GAS=true npx hardhat test
 npx hardhat node
 npx hardhat run scripts/deploy.js --network polygon

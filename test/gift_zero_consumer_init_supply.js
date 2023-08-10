@@ -2,7 +2,7 @@ const { ethers, upgrades } = require("hardhat");
 const { expect } = require("chai");
 const BigNumber = require("bignumber.js");
 
-describe("GIFT token", function () {
+describe("GIFT token init supply", function () {
   async function deploy() {
     signers = await ethers.getSigners();
     sellingWallet = signers[0];
@@ -12,15 +12,15 @@ describe("GIFT token", function () {
     const Access = await ethers.getContractFactory("Access");
     access = await upgrades.deployProxy(Access, []);
     await access.deployed();
-
+// 0x4e9fc7480c16F3FE5d956C0759eE6b4808d1F5D7
     const ReserveConsumerV3 = await ethers.getContractFactory("ReserveConsumerV3");
-    reserveConsumerV3 = await upgrades.deployProxy(ReserveConsumerV3, ['0x4e9fc7480c16F3FE5d956C0759eE6b4808d1F5D7']);
+    reserveConsumerV3 = await upgrades.deployProxy(ReserveConsumerV3, ['0x0000000000000000000000000000000000000000']);
     await reserveConsumerV3.deployed();
 
     const GIFT = await ethers.getContractFactory("GIFT");
     gift = await upgrades.deployProxy(GIFT, [
       access.address,
-      reserveConsumerV3.address,
+      '0x0000000000000000000000000000000000000000',
       sellingWallet.address,
     ]);
     await gift.deployed();
@@ -64,11 +64,7 @@ describe("GIFT token", function () {
     });
 
     it("Should have correct total supply", async function () {
-      expect(await contracts.gift.totalSupply()).to.equal(ethers.utils.parseEther("0"));
-    });
-
-    it("Should have correct reserve address", async function () {
-      expect(await contracts.gift.reserveConsumer()).to.equal(contracts.reserveConsumerV3.address);
+      expect(await contracts.gift.totalSupply()).to.equal(ethers.utils.parseEther("1000"));
     });
 
     it("Should have correct access address", async function () {
@@ -79,8 +75,8 @@ describe("GIFT token", function () {
       expect(await contracts.gift.supplyController()).to.equal(sellingWallet.address);
     });
 
-    it("Reserve consumer should have correct functionality", async function () {
-      expect(await contracts.reserveConsumerV3.getLatestReserve()).to.not.equal("0");
+    it("Reserve consumer should have 0x0 address", async function () {
+      expect(await contracts.gift.reserveConsumer()).to.equal('0x0000000000000000000000000000000000000000');
     });
 
   });
@@ -94,27 +90,13 @@ describe("GIFT token", function () {
 
     it("Should mint 1 GIFT with increase supply", async function () {
       await contracts.gift.increaseSupply(ethers.utils.parseEther("1"));
-      expect(await contracts.gift.totalSupply()).to.equal(ethers.utils.parseEther("1"));
+      expect(await contracts.gift.totalSupply()).to.equal(ethers.utils.parseEther("1001"));
     });
 
     it("Only supply controller can mint", async function () {
       await expect(contracts.gift.connect(sender).increaseSupply(ethers.utils.parseEther("1")))
         .to.be.revertedWith("caller is not the supplyController");
     });
-
-    it("Can mint up to reserveConsumer reserve", async function () {
-      const reserve = await contracts.reserveConsumerV3.getLatestReserve();
-      const reserveBN = (new BigNumber(reserve.toString())).multipliedBy(1e10);
-      await contracts.gift.increaseSupply(reserveBN.minus(1e18).toString());
-      expect(await contracts.gift.totalSupply()).to.equal(reserveBN.toString());
-    })
-
-    it("Shouldnt mint more than reserveConsumer reserve", async function () {
-      const reserve = await contracts.reserveConsumerV3.getLatestReserve();
-      const reserveBN = (new BigNumber(reserve.toString())).multipliedBy(1e10);
-      await expect(contracts.gift.increaseSupply(ethers.utils.parseEther("1")))
-        .to.be.revertedWith("GIFT reserve: underlying supply exceeds proof-of-reserves");
-    })
 
   });
 
@@ -123,9 +105,6 @@ describe("GIFT token", function () {
     before(async function () {
       // Get the Contract and Signers here.
       contracts = await deploy();
-      const reserve = await contracts.reserveConsumerV3.getLatestReserve();
-      const reserveBN = (new BigNumber(reserve.toString())).multipliedBy(1e10);
-      await contracts.gift.increaseSupply(reserveBN.minus(1e18).toString());
 
     });
 
