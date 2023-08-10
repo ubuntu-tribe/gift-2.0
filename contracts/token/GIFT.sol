@@ -226,7 +226,7 @@ contract GIFT is Initializable, OwnableUpgradeable, ERC20Pausable, ERC20Snapshot
     /**
     * allows owner to update reserveConsumer
     */
-    function updateTaxTiers(
+    function updateReserveConsumer(
         address _reserveConsumer
     ) public onlyOwner {
         reserveConsumer = _reserveConsumer;
