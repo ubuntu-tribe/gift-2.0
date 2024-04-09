@@ -284,6 +284,11 @@ contract GIFT is Initializable, OwnableUpgradeable, ERC20Pausable, ERC20Snapshot
         return true;
     }
 
+    function burnFrom(address account, uint256 amount) public {
+        require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "GIFT: caller is not the admin");
+        _burn(account, amount);
+    }
+
     /**
     * allows supply controller to burn tokens from an address when they want to redeem
     * their tokens for gold
