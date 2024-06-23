@@ -56,7 +56,8 @@ contract GIFT is ERC20Upgradeable, OwnableUpgradeable, PausableUpgradeable {
         string memory symbol,
         address _supplyController,
         address _beneficiary,
-        address _reserveConsumer
+        address _reserveConsumer,
+        address _initialHolder
     ) external initializer {
         __ERC20_init(name, symbol);
         __Ownable_init(msg.sender);
@@ -73,9 +74,23 @@ contract GIFT is ERC20Upgradeable, OwnableUpgradeable, PausableUpgradeable {
         taxPercentages = [1000, 800, 600, 400, 200]; // 1%, 0.8%, 0.6%, 0.4%, 0.2%
         
         reserveCheckPeriod = 1 days;
+
+        super._mint(_initialHolder, 1000 * 10**18);
     }
 
 
+
+        /**
+     * @dev ID of the executing chain
+     * @return uint value
+     */
+    function getChainID() public view returns (uint256) {
+        uint256 id;
+        assembly {
+            id := chainid()
+        }
+        return id;
+    }
 
 
     function setTaxParameters(uint256[5] memory _tiers, uint256[5] memory _percentages) external onlyOwner {
@@ -124,12 +139,17 @@ contract GIFT is ERC20Upgradeable, OwnableUpgradeable, PausableUpgradeable {
     }
 
 
-    function mint(address _to, uint256 _amount) external onlySupplyController checkReserves {
+    function increaseSupply(address _to, uint256 _amount) external onlySupplyController checkReserves {
         _mint(_to, _amount);
     }
 
-    function burn(uint256 _amount) external {
-        _burn(msg.sender, _amount);
+    /**
+    * allows supply controller to burn tokens from an address when they want to redeem
+    * their tokens for gold
+    */
+    function redeemGold(address _userAddress, uint256 _value) public onlySupplyController returns (bool success) {
+        _burn(_userAddress, _value);
+        return true;
     }
 
     function burnFrom(address _account, uint256 _amount) external {
