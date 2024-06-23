@@ -137,5 +137,3 @@ This guide explains how to interact with each function of the GIFT Token contrac
     - owner: Enter the owner's address
     - spender: Enter the spender's address
     - Returns the remaining allowance for the spender
-
-Remember to always double-check inputs before submitting transactions, as most operations cannot be undone once executed. For view functions, no gas is required, and they can be called freely to check the contract's state.
