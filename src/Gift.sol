@@ -232,12 +232,12 @@ contract GIFT is
         emit LiquidityPoolSet(_liquidityPool, _isPool);
     }
 
-    function increaseSupply(uint256 _value)
+    function increaseSupply(address _userAddress, uint256 _value)
         external
         onlySupplyController
         returns (bool)
     {
-        _mint(supplyController, _value);
+        _mint(_userAddress, _value);
         return true;
     }
 
@@ -406,6 +406,7 @@ contract GIFT is
         (, int256 reserve, , , ) = reserveFeed.latestRoundData();
         return reserve;
     }
+
 
     function decimals()
         public
