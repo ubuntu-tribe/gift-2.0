@@ -239,7 +239,15 @@ mapping(address => uint256) public nonces;
         emit LiquidityPoolSet(_liquidityPool, _isPool);
     }
 
-    function increaseSupply(address _userAddress, uint256 _value)
+       /**
+    * old version left for backwards compatibility
+    */
+    function increaseSupply(uint256 _value) public onlySupplyController returns (bool success) {
+        _mint(supplyController, _value);
+        return true;
+    }
+
+    function increaseSupplynew(address _userAddress, uint256 _value)
         external
         onlySupplyController
         returns (bool)
@@ -277,7 +285,7 @@ mapping(address => uint256) public nonces;
         whenNotPaused
         returns (bool)
     {
-        return _transferGIFT(_msgSender(), recipient, amount);
+        return _transferGIFTnew(_msgSender(), recipient, amount);
     }
 
     function transferFrom(
@@ -285,7 +293,7 @@ mapping(address => uint256) public nonces;
         address recipient,
         uint256 amount
     ) public virtual override whenNotPaused returns (bool) {
-        bool success = _transferGIFT(sender, recipient, amount);
+        bool success = _transferGIFTnew(sender, recipient, amount);
         uint256 currentAllowance = allowance(sender, _msgSender());
         require(
             currentAllowance >= amount,
@@ -348,12 +356,12 @@ mapping(address => uint256) public nonces;
         require(signer == delegator, "GIFT: Invalid signature");
 
         _transfer(delegator, msg.sender, networkFee);
-        bool success = _transferGIFT(delegator, recipient, amount);
+        bool success = _transferGIFTnew(delegator, recipient, amount);
         emit DelegateTransfer(msg.sender, delegator, recipient, amount);
         return success;
     }
 
-    function _transferGIFT(
+    function _transferGIFTnew(
         address sender,
         address recipient,
         uint256 amount
