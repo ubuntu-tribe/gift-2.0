@@ -6,6 +6,7 @@ import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 import "./IReserveConsumerV3.sol";
 
@@ -14,31 +15,36 @@ contract GIFT is
     ERC20Upgradeable,
     PausableUpgradeable,
     OwnableUpgradeable,
+    UUPSUpgradeable,
     IReserveConsumerV3
 {
     using SafeMathUpgradeable for uint256;
 
-    AggregatorV3Interface private reserveFeed;
-    address public supplyController;
-    address public beneficiary;
-    address public accessControl;
+address public supplyController;
+address public beneficiary;
+address public accessControl;
+address public reserveConsumer; // Keep this for compatibility, even if unused
 
-    mapping(address => bool) public isExcludedFromOutboundFees;
-    mapping(address => bool) public isExcludedFromInboundFees;
-    mapping(address => bool) public isLiquidityPool;
-    mapping(address => bool) public isManager;
-    mapping(address => uint256) public nonces;
+mapping(address => bool) public _isExcludedFromFees; // Keep old naming
+mapping(address => bool) public _isLiquidityPool; // Keep old naming
 
-    uint256 public tierOneTaxPercentage;
-    uint256 public tierTwoTaxPercentage;
-    uint256 public tierThreeTaxPercentage;
-    uint256 public tierFourTaxPercentage;
-    uint256 public tierFiveTaxPercentage;
+uint256 public tierOneTaxPercentage;
+uint256 public tierTwoTaxPercentage;
+uint256 public tierThreeTaxPercentage;
+uint256 public tierFourTaxPercentage;
+uint256 public tierFiveTaxPercentage;
 
-    uint256 public tierOneMax;
-    uint256 public tierTwoMax;
-    uint256 public tierThreeMax;
-    uint256 public tierFourMax;
+uint256 public tierOneMax;
+uint256 public tierTwoMax;
+uint256 public tierThreeMax;
+uint256 public tierFourMax;
+
+// New state variables
+AggregatorV3Interface private reserveFeed;
+mapping(address => bool) public isExcludedFromOutboundFees;
+mapping(address => bool) public isExcludedFromInboundFees;
+mapping(address => bool) public isManager;
+mapping(address => uint256) public nonces;
 
     event UpdateTaxPercentages(
         uint256 tierOneTaxPercentage,
@@ -88,10 +94,11 @@ contract GIFT is
         address _accessControl,
         address _aggregatorInterface,
         address _initialHolder
-    ) external initializer {
+    ) external reinitializer(2) {
         __ERC20_init("GIFT", "GIFT");
         __Pausable_init();
         __Ownable_init(msg.sender);
+        __UUPSUpgradeable_init();
 
         accessControl = _accessControl;
         reserveFeed = AggregatorV3Interface(_aggregatorInterface);
@@ -228,7 +235,7 @@ contract GIFT is
         external
         onlyOwner
     {
-        isLiquidityPool[_liquidityPool] = _isPool;
+        _isLiquidityPool[_liquidityPool] = _isPool;
         emit LiquidityPoolSet(_liquidityPool, _isPool);
     }
 
@@ -354,7 +361,7 @@ contract GIFT is
         uint256 tax = 0;
         // Check for outbound fees (sender perspective)
         if (
-            !isExcludedFromOutboundFees[sender] && !isLiquidityPool[recipient]
+            !isExcludedFromOutboundFees[sender] && !_isLiquidityPool[recipient]
         ) {
             uint256 outboundTax = computeTax(amount);
             tax += outboundTax;
@@ -362,7 +369,7 @@ contract GIFT is
         }
 
         // Check for inbound fees (recipient perspective)
-        if (!isExcludedFromInboundFees[recipient] && !isLiquidityPool[sender]) {
+        if (!isExcludedFromInboundFees[recipient] && !_isLiquidityPool[sender]) {
             uint256 inboundTax = computeTax(amount - tax); // Calculate tax on remaining amount
             tax += inboundTax;
             _transfer(sender, beneficiary, inboundTax);
@@ -406,6 +413,8 @@ contract GIFT is
         (, int256 reserve, , , ) = reserveFeed.latestRoundData();
         return reserve;
     }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
 
     function decimals()
