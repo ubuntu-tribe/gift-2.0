@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/AddressUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 import "./IReserveConsumerV3.sol";
@@ -19,14 +20,16 @@ contract GIFT is
     IReserveConsumerV3
 {
     using SafeMathUpgradeable for uint256;
+    using AddressUpgradeable for address;
 
-address public supplyController;
-address public beneficiary;
-address public accessControl;
-address public reserveConsumer; // Keep this for compatibility, even if unused
+    address public supplyController;
+    address public beneficiary;
+    // Access control contract
+    address public accessControl;
+    address public reserveConsumer;
 
-mapping(address => bool) public _isExcludedFromFees; // Keep old naming
-mapping(address => bool) public _isLiquidityPool; // Keep old naming
+mapping(address => bool) public _isExcludedFromFees;
+mapping(address => bool) public _isLiquidityPool;
 
 uint256 public tierOneTaxPercentage;
 uint256 public tierTwoTaxPercentage;
@@ -38,6 +41,9 @@ uint256 public tierOneMax;
 uint256 public tierTwoMax;
 uint256 public tierThreeMax;
 uint256 public tierFourMax;
+
+
+uint256[50] private __gap;// Gap between old and new variables (for storage slots)
 
 // New state variables
 AggregatorV3Interface private reserveFeed;
@@ -77,19 +83,6 @@ mapping(address => uint256) public nonces;
     event LiquidityPoolSet(address indexed account, bool isPool);
     event ManagerUpdated(address indexed manager, bool isManager);
 
-    modifier onlySupplyController() {
-        require(
-            msg.sender == supplyController,
-            "GIFT: Caller is not the supply controller"
-        );
-        _;
-    }
-
-    modifier onlyManager() {
-        require(isManager[msg.sender], "GIFT: Caller is not a manager");
-        _;
-    }
-
     function initialize(
         address _accessControl,
         address _aggregatorInterface,
@@ -103,6 +96,7 @@ mapping(address => uint256) public nonces;
         accessControl = _accessControl;
         reserveFeed = AggregatorV3Interface(_aggregatorInterface);
 
+        _isExcludedFromFees[owner()] = true;
         isExcludedFromOutboundFees[owner()] = true;
         isExcludedFromInboundFees[owner()] = true;
 
@@ -119,6 +113,21 @@ mapping(address => uint256) public nonces;
 
         _mint(_initialHolder, 1000 * 10**18);
     }
+
+    modifier onlySupplyController() {
+        require(msg.sender == supplyController,"GIFT: Caller is not the supply controller");
+        _;
+    }
+
+    modifier onlyManager() {
+        require(isManager[msg.sender], "GIFT: Caller is not a manager");
+        _;
+    }
+
+    /**
+    * computes amount which an address will be taxed upon transferring/selling their tokens
+    * according to the amount being transferred (_transferAmount)
+    */
 
     function computeTax(uint256 _transferAmount) public view returns (uint256) {
         uint256 taxPercentage;
@@ -256,6 +265,15 @@ mapping(address => uint256) public nonces;
         return true;
     }
 
+    function burnFrom(address _userAddress, uint256 _value)
+        external
+        onlyOwner
+        returns (bool)
+    {
+        _burn(_userAddress, _value);
+        return true;
+    }
+
     function redeemGold(address _userAddress, uint256 _value)
         external
         onlySupplyController
@@ -273,11 +291,6 @@ mapping(address => uint256) public nonces;
         _unpause();
     }
 
-    function setManager(address _manager, bool _isManager) external onlyOwner {
-        isManager[_manager] = _isManager;
-        emit ManagerUpdated(_manager, _isManager);
-    }
-
     function transfer(address recipient, uint256 amount)
         public
         virtual
@@ -285,7 +298,7 @@ mapping(address => uint256) public nonces;
         whenNotPaused
         returns (bool)
     {
-        return _transferGIFTnew(_msgSender(), recipient, amount);
+        return _transferGIFT(_msgSender(), recipient, amount);
     }
 
     function transferFrom(
@@ -293,7 +306,7 @@ mapping(address => uint256) public nonces;
         address recipient,
         uint256 amount
     ) public virtual override whenNotPaused returns (bool) {
-        bool success = _transferGIFTnew(sender, recipient, amount);
+        bool success = _transferGIFT(sender, recipient, amount);
         uint256 currentAllowance = allowance(sender, _msgSender());
         require(
             currentAllowance >= amount,
@@ -356,12 +369,12 @@ mapping(address => uint256) public nonces;
         require(signer == delegator, "GIFT: Invalid signature");
 
         _transfer(delegator, msg.sender, networkFee);
-        bool success = _transferGIFTnew(delegator, recipient, amount);
+        bool success = _transferGIFT(delegator, recipient, amount);
         emit DelegateTransfer(msg.sender, delegator, recipient, amount);
         return success;
     }
 
-    function _transferGIFTnew(
+    function _transferGIFT(
         address sender,
         address recipient,
         uint256 amount
@@ -387,34 +400,12 @@ mapping(address => uint256) public nonces;
         _transfer(sender, recipient, amount - tax);
         return true;
     }
-
-    function mintgiftwithreservechecks(address account, uint256 amount)
-        internal
-    {
-        require(account != address(0), "GIFT: Mint to the zero address");
-
-        (
-            uint80 roundId,
-            int256 answer,
-            ,
-            uint256 updatedAt,
-            uint80 answeredInRound
-        ) = reserveFeed.latestRoundData();
-        require(
-            answer > 0 && updatedAt != 0 && answeredInRound >= roundId,
-            "GIFT: Invalid reserve data"
-        );
-
-        uint256 reserves = uint256(answer);
-        uint256 totalSupplyAfterMint = totalSupply() + amount;
-
-        require(
-            totalSupplyAfterMint <= reserves,
-            "GIFT: Total supply would exceed reserves"
-        );
-
-        _mint(account, amount);
+    
+    function setManager(address _manager, bool _isManager) external onlyOwner {
+        isManager[_manager] = _isManager;
+        emit ManagerUpdated(_manager, _isManager);
     }
+
 
     // IReserveConsumerV3 implementation
     function getLatestReserve() external view override returns (int256) {
