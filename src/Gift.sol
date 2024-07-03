@@ -8,43 +8,38 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
-import "./IReserveConsumerV3.sol";
 
 contract GIFT is
     Initializable,
     ERC20Upgradeable,
     PausableUpgradeable,
     OwnableUpgradeable,
-    UUPSUpgradeable,
-    IReserveConsumerV3
+    UUPSUpgradeable
 {
     using SafeMathUpgradeable for uint256;
 
-address public supplyController;
-address public beneficiary;
-address public accessControl;
-address public reserveConsumer; // Keep this for compatibility, even if unused
+    address public supplyController;
+    address public beneficiary;
+    address public taxOfficer;
+    address public supplyManager;
 
-mapping(address => bool) public _isExcludedFromFees; // Keep old naming
-mapping(address => bool) public _isLiquidityPool; // Keep old naming
+    uint256 public tierOneTaxPercentage;
+    uint256 public tierTwoTaxPercentage;
+    uint256 public tierThreeTaxPercentage;
+    uint256 public tierFourTaxPercentage;
+    uint256 public tierFiveTaxPercentage;
 
-uint256 public tierOneTaxPercentage;
-uint256 public tierTwoTaxPercentage;
-uint256 public tierThreeTaxPercentage;
-uint256 public tierFourTaxPercentage;
-uint256 public tierFiveTaxPercentage;
+    uint256 public tierOneMax;
+    uint256 public tierTwoMax;
+    uint256 public tierThreeMax;
+    uint256 public tierFourMax;
 
-uint256 public tierOneMax;
-uint256 public tierTwoMax;
-uint256 public tierThreeMax;
-uint256 public tierFourMax;
-
-// New state variables
-AggregatorV3Interface private reserveFeed;
-mapping(address => bool) public isExcludedFromOutboundFees;
-mapping(address => bool) public isExcludedFromInboundFees;
-mapping(address => bool) public isManager;
-mapping(address => uint256) public nonces;
+    AggregatorV3Interface private reserveFeed;
+    mapping(address => bool) public isExcludedFromOutboundFees;
+    mapping(address => bool) public isExcludedFromInboundFees;
+    mapping(address => bool) public _isLiquidityPool;
+    mapping(address => bool) public isManager;
+    mapping(address => uint256) public nonces;
 
     event UpdateTaxPercentages(
         uint256 tierOneTaxPercentage,
@@ -62,6 +57,8 @@ mapping(address => uint256) public nonces;
     );
 
     event NewSupplyController(address indexed newSupplyController);
+    event NewTaxOfficer(address indexed newTaxOfficer);
+    event NewSupplyManager(address indexed newSupplyManager);
     event NewBeneficiary(address indexed newBeneficiary);
     event DelegateTransfer(
         address sender,
@@ -85,22 +82,44 @@ mapping(address => uint256) public nonces;
         _;
     }
 
+    modifier onlySupplyManager() {
+        require(
+            msg.sender == supplyManager,
+            "GIFT: Caller is not the supply manager"
+        );
+        _;
+    }
+
+    modifier onlyTaxOfficer() {
+        require(
+            msg.sender == taxOfficer,
+            "GIFT: Caller is not the supply controller"
+        );
+        _;
+    }
+
     modifier onlyManager() {
         require(isManager[msg.sender], "GIFT: Caller is not a manager");
         _;
     }
 
-    function initialize(
-        address _accessControl,
-        address _aggregatorInterface,
-        address _initialHolder
-    ) external reinitializer(2) {
+    modifier onlyOwnerOrTaxOfficer() {
+        require(
+            msg.sender == owner() || msg.sender == taxOfficer,
+            "Caller is not the owner or tax officer"
+        );
+        _;
+    }
+
+    function initialize(address _aggregatorInterface, address _initialHolder)
+        public
+        reinitializer(2)
+    {
         __ERC20_init("GIFT", "GIFT");
         __Pausable_init();
         __Ownable_init(msg.sender);
         __UUPSUpgradeable_init();
 
-        accessControl = _accessControl;
         reserveFeed = AggregatorV3Interface(_aggregatorInterface);
 
         isExcludedFromOutboundFees[owner()] = true;
@@ -172,7 +191,7 @@ mapping(address => uint256) public nonces;
         uint256 _tierThreeTaxPercentage,
         uint256 _tierFourTaxPercentage,
         uint256 _tierFiveTaxPercentage
-    ) external onlyOwner {
+    ) external onlyOwnerOrTaxOfficer {
         tierOneTaxPercentage = _tierOneTaxPercentage;
         tierTwoTaxPercentage = _tierTwoTaxPercentage;
         tierThreeTaxPercentage = _tierThreeTaxPercentage;
@@ -192,7 +211,7 @@ mapping(address => uint256) public nonces;
         uint256 _tierTwoMax,
         uint256 _tierThreeMax,
         uint256 _tierFourMax
-    ) external onlyOwner {
+    ) external onlyOwnerOrTaxOfficer {
         tierOneMax = _tierOneMax;
         tierTwoMax = _tierTwoMax;
         tierThreeMax = _tierThreeMax;
@@ -212,6 +231,24 @@ mapping(address => uint256) public nonces;
         emit NewSupplyController(supplyController);
     }
 
+    function setSupplyManager(address _newSupplyManager) external onlyOwner {
+        require(
+            _newSupplyManager != address(0),
+            "GIFT: Cannot set supply manager to address zero"
+        );
+        supplyManager = _newSupplyManager;
+        emit NewSupplyManager(supplyManager);
+    }
+
+    function setTaxOfficer(address _newTaxOfficer) external onlyOwner {
+        require(
+            _newTaxOfficer != address(0),
+            "GIFT: Cannot set tax officer to address zero"
+        );
+        taxOfficer = _newTaxOfficer;
+        emit NewTaxOfficer(taxOfficer);
+    }
+
     function setBeneficiary(address _newBeneficiary) external onlyOwner {
         require(
             _newBeneficiary != address(0),
@@ -225,7 +262,7 @@ mapping(address => uint256) public nonces;
         address _address,
         bool _isExcludedOutbound,
         bool _isExcludedInbound
-    ) external onlyOwner {
+    ) external onlyOwnerOrTaxOfficer {
         isExcludedFromOutboundFees[_address] = _isExcludedOutbound;
         isExcludedFromInboundFees[_address] = _isExcludedInbound;
         emit FeeExclusionSet(_address, _isExcludedOutbound, _isExcludedInbound);
@@ -239,15 +276,20 @@ mapping(address => uint256) public nonces;
         emit LiquidityPoolSet(_liquidityPool, _isPool);
     }
 
-       /**
-    * old version left for backwards compatibility
-    */
-    function increaseSupply(uint256 _value) public onlySupplyController returns (bool success) {
-        _mint(supplyController, _value);
+    /**
+     * Minting and Burn functions
+     */
+
+    function inflateSupply(uint256 _value)
+        external
+        onlySupplyManager
+        returns (bool)
+    {
+        _mint(supplyManager, _value);
         return true;
     }
 
-    function increaseSupplynew(address _userAddress, uint256 _value)
+    function increaseSupply(address _userAddress, uint256 _value)
         external
         onlySupplyController
         returns (bool)
@@ -285,7 +327,7 @@ mapping(address => uint256) public nonces;
         whenNotPaused
         returns (bool)
     {
-        return _transferGIFTnew(_msgSender(), recipient, amount);
+        return _transferGIFT(_msgSender(), recipient, amount);
     }
 
     function transferFrom(
@@ -293,7 +335,7 @@ mapping(address => uint256) public nonces;
         address recipient,
         uint256 amount
     ) public virtual override whenNotPaused returns (bool) {
-        bool success = _transferGIFTnew(sender, recipient, amount);
+        bool success = _transferGIFT(sender, recipient, amount);
         uint256 currentAllowance = allowance(sender, _msgSender());
         require(
             currentAllowance >= amount,
@@ -356,12 +398,12 @@ mapping(address => uint256) public nonces;
         require(signer == delegator, "GIFT: Invalid signature");
 
         _transfer(delegator, msg.sender, networkFee);
-        bool success = _transferGIFTnew(delegator, recipient, amount);
+        bool success = _transferGIFT(delegator, recipient, amount);
         emit DelegateTransfer(msg.sender, delegator, recipient, amount);
         return success;
     }
 
-    function _transferGIFTnew(
+    function _transferGIFT(
         address sender,
         address recipient,
         uint256 amount
@@ -377,7 +419,9 @@ mapping(address => uint256) public nonces;
         }
 
         // Check for inbound fees (recipient perspective)
-        if (!isExcludedFromInboundFees[recipient] && !_isLiquidityPool[sender]) {
+        if (
+            !isExcludedFromInboundFees[recipient] && !_isLiquidityPool[sender]
+        ) {
             uint256 inboundTax = computeTax(amount - tax); // Calculate tax on remaining amount
             tax += inboundTax;
             _transfer(sender, beneficiary, inboundTax);
@@ -388,48 +432,17 @@ mapping(address => uint256) public nonces;
         return true;
     }
 
-    function mintgiftwithreservechecks(address account, uint256 amount)
+    function _authorizeUpgrade(address newImplementation)
         internal
-    {
-        require(account != address(0), "GIFT: Mint to the zero address");
-
-        (
-            uint80 roundId,
-            int256 answer,
-            ,
-            uint256 updatedAt,
-            uint80 answeredInRound
-        ) = reserveFeed.latestRoundData();
-        require(
-            answer > 0 && updatedAt != 0 && answeredInRound >= roundId,
-            "GIFT: Invalid reserve data"
-        );
-
-        uint256 reserves = uint256(answer);
-        uint256 totalSupplyAfterMint = totalSupply() + amount;
-
-        require(
-            totalSupplyAfterMint <= reserves,
-            "GIFT: Total supply would exceed reserves"
-        );
-
-        _mint(account, amount);
-    }
-
-    // IReserveConsumerV3 implementation
-    function getLatestReserve() external view override returns (int256) {
-        (, int256 reserve, , , ) = reserveFeed.latestRoundData();
-        return reserve;
-    }
-
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
-
+        override
+        onlyOwner
+    {}
 
     function decimals()
         public
         view
         virtual
-        override(ERC20Upgradeable, IReserveConsumerV3)
+        override(ERC20Upgradeable)
         returns (uint8)
     {
         return super.decimals();
