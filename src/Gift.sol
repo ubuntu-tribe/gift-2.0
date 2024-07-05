@@ -8,6 +8,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "./GIFTTaxManager.sol";
 
 contract GIFT is
     Initializable,
@@ -19,59 +20,25 @@ contract GIFT is
     using SafeMathUpgradeable for uint256;
 
     address public supplyController;
-    address public beneficiary;
-    address public taxOfficer;
     address public supplyManager;
 
-    uint256 public tierOneTaxPercentage;
-    uint256 public tierTwoTaxPercentage;
-    uint256 public tierThreeTaxPercentage;
-    uint256 public tierFourTaxPercentage;
-    uint256 public tierFiveTaxPercentage;
-
-    uint256 public tierOneMax;
-    uint256 public tierTwoMax;
-    uint256 public tierThreeMax;
-    uint256 public tierFourMax;
-
     AggregatorV3Interface private reserveFeed;
-    mapping(address => bool) public isExcludedFromOutboundFees;
-    mapping(address => bool) public isExcludedFromInboundFees;
-    mapping(address => bool) public _isLiquidityPool;
+    GIFTTaxManager public taxManager;
+
     mapping(address => bool) public isManager;
     mapping(address => uint256) public nonces;
 
-    event UpdateTaxPercentages(
-        uint256 tierOneTaxPercentage,
-        uint256 tierTwoTaxPercentage,
-        uint256 tierThreeTaxPercentage,
-        uint256 tierFourTaxPercentage,
-        uint256 tierFiveTaxPercentage
-    );
-
-    event UpdateTaxTiers(
-        uint256 tierOneMax,
-        uint256 tierTwoMax,
-        uint256 tierThreeMax,
-        uint256 tierFourMax
-    );
 
     event NewSupplyController(address indexed newSupplyController);
-    event NewTaxOfficer(address indexed newTaxOfficer);
     event NewSupplyManager(address indexed newSupplyManager);
-    event NewBeneficiary(address indexed newBeneficiary);
+    event TaxManagerUpdated(address indexed newTaxManager);
     event DelegateTransfer(
         address sender,
         address delegator,
         address receiver,
         uint256 amount
     );
-    event FeeExclusionSet(
-        address indexed account,
-        bool isExcludedOutbound,
-        bool isExcludedInbound
-    );
-    event LiquidityPoolSet(address indexed account, bool isPool);
+
     event ManagerUpdated(address indexed manager, bool isManager);
 
     modifier onlySupplyController() {
@@ -90,28 +57,12 @@ contract GIFT is
         _;
     }
 
-    modifier onlyTaxOfficer() {
-        require(
-            msg.sender == taxOfficer,
-            "GIFT: Caller is not the supply controller"
-        );
-        _;
-    }
-
     modifier onlyManager() {
         require(isManager[msg.sender], "GIFT: Caller is not a manager");
         _;
     }
 
-    modifier onlyOwnerOrTaxOfficer() {
-        require(
-            msg.sender == owner() || msg.sender == taxOfficer,
-            "Caller is not the owner or tax officer"
-        );
-        _;
-    }
-
-    function initialize(address _aggregatorInterface, address _initialHolder)
+    function initialize(address _aggregatorInterface, address _initialHolder, address _taxManager)
         public
         reinitializer(2)
     {
@@ -120,42 +71,31 @@ contract GIFT is
         __Ownable_init(msg.sender);
         __UUPSUpgradeable_init();
 
+        taxManager = GIFTTaxManager(_taxManager);      
         reserveFeed = AggregatorV3Interface(_aggregatorInterface);
-
-        isExcludedFromOutboundFees[owner()] = true;
-        isExcludedFromInboundFees[owner()] = true;
-
-        tierOneTaxPercentage = 1618;
-        tierTwoTaxPercentage = 1200;
-        tierThreeTaxPercentage = 1000;
-        tierFourTaxPercentage = 500;
-        tierFiveTaxPercentage = 300;
-
-        tierOneMax = 2000 * 10**18;
-        tierTwoMax = 10000 * 10**18;
-        tierThreeMax = 20000 * 10**18;
-        tierFourMax = 200000 * 10**18;
 
         _mint(_initialHolder, 1000 * 10**18);
     }
 
-    function computeTax(uint256 _transferAmount) public view returns (uint256) {
-        uint256 taxPercentage;
+function computeTaxUsingManager(uint256 _transferAmount) internal view returns (uint256) {
+    uint256 taxPercentage;
+    (uint256 tierOneMax, uint256 tierTwoMax, uint256 tierThreeMax, uint256 tierFourMax) = taxManager.getTaxTiers();
+    (uint256 tierOneTax, uint256 tierTwoTax, uint256 tierThreeTax, uint256 tierFourTax, uint256 tierFiveTax) = taxManager.getTaxPercentages();
 
-        if (_transferAmount <= tierOneMax) {
-            taxPercentage = tierOneTaxPercentage;
-        } else if (_transferAmount <= tierTwoMax) {
-            taxPercentage = tierTwoTaxPercentage;
-        } else if (_transferAmount <= tierThreeMax) {
-            taxPercentage = tierThreeTaxPercentage;
-        } else if (_transferAmount <= tierFourMax) {
-            taxPercentage = tierFourTaxPercentage;
-        } else {
-            taxPercentage = tierFiveTaxPercentage;
-        }
-
-        return _transferAmount.mul(taxPercentage).div(100000);
+    if (_transferAmount <= tierOneMax) {
+        taxPercentage = tierOneTax;
+    } else if (_transferAmount <= tierTwoMax) {
+        taxPercentage = tierTwoTax;
+    } else if (_transferAmount <= tierThreeMax) {
+        taxPercentage = tierThreeTax;
+    } else if (_transferAmount <= tierFourMax) {
+        taxPercentage = tierFourTax;
+    } else {
+        taxPercentage = tierFiveTax;
     }
+
+    return _transferAmount.mul(taxPercentage).div(100000);
+}
 
     function getChainID() public view returns (uint256) {
         uint256 id;
@@ -185,40 +125,6 @@ contract GIFT is
             );
     }
 
-    function updateTaxPercentages(
-        uint256 _tierOneTaxPercentage,
-        uint256 _tierTwoTaxPercentage,
-        uint256 _tierThreeTaxPercentage,
-        uint256 _tierFourTaxPercentage,
-        uint256 _tierFiveTaxPercentage
-    ) external onlyOwnerOrTaxOfficer {
-        tierOneTaxPercentage = _tierOneTaxPercentage;
-        tierTwoTaxPercentage = _tierTwoTaxPercentage;
-        tierThreeTaxPercentage = _tierThreeTaxPercentage;
-        tierFourTaxPercentage = _tierFourTaxPercentage;
-        tierFiveTaxPercentage = _tierFiveTaxPercentage;
-        emit UpdateTaxPercentages(
-            tierOneTaxPercentage,
-            tierTwoTaxPercentage,
-            tierThreeTaxPercentage,
-            tierFourTaxPercentage,
-            tierFiveTaxPercentage
-        );
-    }
-
-    function updateTaxTiers(
-        uint256 _tierOneMax,
-        uint256 _tierTwoMax,
-        uint256 _tierThreeMax,
-        uint256 _tierFourMax
-    ) external onlyOwnerOrTaxOfficer {
-        tierOneMax = _tierOneMax;
-        tierTwoMax = _tierTwoMax;
-        tierThreeMax = _tierThreeMax;
-        tierFourMax = _tierFourMax;
-        emit UpdateTaxTiers(tierOneMax, tierTwoMax, tierThreeMax, tierFourMax);
-    }
-
     function setSupplyController(address _newSupplyController)
         external
         onlyOwner
@@ -238,42 +144,6 @@ contract GIFT is
         );
         supplyManager = _newSupplyManager;
         emit NewSupplyManager(supplyManager);
-    }
-
-    function setTaxOfficer(address _newTaxOfficer) external onlyOwner {
-        require(
-            _newTaxOfficer != address(0),
-            "GIFT: Cannot set tax officer to address zero"
-        );
-        taxOfficer = _newTaxOfficer;
-        emit NewTaxOfficer(taxOfficer);
-    }
-
-    function setBeneficiary(address _newBeneficiary) external onlyOwner {
-        require(
-            _newBeneficiary != address(0),
-            "GIFT: Cannot set beneficiary to address zero"
-        );
-        beneficiary = _newBeneficiary;
-        emit NewBeneficiary(beneficiary);
-    }
-
-    function setFeeExclusion(
-        address _address,
-        bool _isExcludedOutbound,
-        bool _isExcludedInbound
-    ) external onlyOwnerOrTaxOfficer {
-        isExcludedFromOutboundFees[_address] = _isExcludedOutbound;
-        isExcludedFromInboundFees[_address] = _isExcludedInbound;
-        emit FeeExclusionSet(_address, _isExcludedOutbound, _isExcludedInbound);
-    }
-
-    function setLiquidityPool(address _liquidityPool, bool _isPool)
-        external
-        onlyOwner
-    {
-        _isLiquidityPool[_liquidityPool] = _isPool;
-        emit LiquidityPoolSet(_liquidityPool, _isPool);
     }
 
     /**
@@ -402,7 +272,7 @@ contract GIFT is
         emit DelegateTransfer(msg.sender, delegator, recipient, amount);
         return success;
     }
-
+ 
     function _transferGIFT(
         address sender,
         address recipient,
@@ -411,25 +281,31 @@ contract GIFT is
         uint256 tax = 0;
         // Check for outbound fees (sender perspective)
         if (
-            !isExcludedFromOutboundFees[sender] && !_isLiquidityPool[recipient]
+            !taxManager.isExcludedFromOutboundFees(sender) && !taxManager._isLiquidityPool(recipient)
         ) {
-            uint256 outboundTax = computeTax(amount);
+            uint256 outboundTax = computeTaxUsingManager(amount);
             tax += outboundTax;
-            _transfer(sender, beneficiary, outboundTax);
+            _transfer(sender, taxManager.beneficiary(), outboundTax);
         }
 
         // Check for inbound fees (recipient perspective)
         if (
-            !isExcludedFromInboundFees[recipient] && !_isLiquidityPool[sender]
+            !taxManager.isExcludedFromInboundFees(recipient) && !taxManager._isLiquidityPool(sender)
         ) {
-            uint256 inboundTax = computeTax(amount - tax); // Calculate tax on remaining amount
+            uint256 inboundTax = computeTaxUsingManager(amount - tax); // Calculate tax on remaining amount
             tax += inboundTax;
-            _transfer(sender, beneficiary, inboundTax);
+            _transfer(sender, taxManager.beneficiary(), inboundTax);
         }
 
         // Transfer the remaining amount after taxes
         _transfer(sender, recipient, amount - tax);
         return true;
+    }
+
+    function setTaxManager(address _newTaxManager) external onlyOwner {
+    require(_newTaxManager != address(0), "GIFT: New tax manager cannot be the zero address");
+    taxManager = GIFTTaxManager(_newTaxManager);
+    emit TaxManagerUpdated(_newTaxManager);
     }
 
     function _authorizeUpgrade(address newImplementation)
