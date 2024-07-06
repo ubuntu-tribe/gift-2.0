@@ -74,7 +74,6 @@ contract GIFT is
         taxManager = GIFTTaxManager(_taxManager);      
         reserveFeed = AggregatorV3Interface(_aggregatorInterface);
 
-        _mint(_initialHolder, 1000 * 10**18);
     }
 
 function computeTaxUsingManager(uint256 _transferAmount) internal view returns (uint256) {
