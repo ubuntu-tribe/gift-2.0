@@ -25,7 +25,6 @@ contract GIFTTaxManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     uint256 public tierFourMax;
 
     mapping(address => bool) public isExcludedFromOutboundFees;
-    mapping(address => bool) public isExcludedFromInboundFees;
     mapping(address => bool) public _isLiquidityPool;
 
     event UpdateTaxPercentages(
@@ -70,7 +69,6 @@ contract GIFTTaxManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         __UUPSUpgradeable_init();
 
         isExcludedFromOutboundFees[owner()] = true;
-        isExcludedFromInboundFees[owner()] = true; 
 
         tierOneTaxPercentage = 1618;
         tierTwoTaxPercentage = 1200;
@@ -82,8 +80,10 @@ contract GIFTTaxManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         tierTwoMax = 10000 * 10**18;
         tierThreeMax = 20000 * 10**18;
         tierFourMax = 200000 * 10**18;
+    }
 
-
+    function isExcludedFromInboundFees(address) public pure returns (bool) {
+        return true; // Always return true, exempting all addresses from inbound taxes
     }
 
     function updateTaxPercentages(
@@ -144,7 +144,6 @@ contract GIFTTaxManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         bool _isExcludedInbound
     ) external onlyOwnerOrTaxOfficer {
         isExcludedFromOutboundFees[_address] = _isExcludedOutbound;
-        isExcludedFromInboundFees[_address] = _isExcludedInbound;
         emit FeeExclusionSet(_address, _isExcludedOutbound, _isExcludedInbound);
     }
 
