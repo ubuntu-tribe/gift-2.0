@@ -54,7 +54,7 @@ contract GIFTBarNFTDeferred is ERC721, Ownable, ReentrancyGuard {
 
     constructor(address registry_)
         ERC721("GIFT Gold Bar", "GIFTBAR")
-        Ownable(msg.sender) // <<— pass deployer as initial owner
+        Ownable(msg.sender) 
     {
         registry = IGIFTBatchRegistry(registry_);
     }
