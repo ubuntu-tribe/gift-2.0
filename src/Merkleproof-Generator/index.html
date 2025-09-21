@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>GIFT Merkle Builder</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;max-width:980px}
+    input,textarea,button,select{font:inherit;padding:8px;margin:6px 0;width:100%}
+    code{background:#f4f4f4;padding:2px 6px;border-radius:4px}
+    .row{display:flex;gap:12px}
+    .row > div{flex:1}
+    .mono{font-family:ui-monospace,Consolas,Menlo,monospace}
+  </style>
+</head>
+<body>
+  <h2>GIFT Merkle Builder</h2>
+
+  <div class="row">
+    <div>
+      <label>Registry Address (deployed GIFTBatchRegistry)</label>
+      <input id="registry" class="mono" placeholder="0x..."/>
+    </div>
+    <div>
+      <label>Batch ID (uint256)</label>
+      <input id="batchId" class="mono" placeholder="e.g. 1"/>
+    </div>
+  </div>
+
+  <label>Schema Hash (optional; @ Oliver so we can have a fixed schema if we want)</label>
+  <input id="schemaHint" class="mono" placeholder='e.g. "GiftMintLeafV1 order v1"' />
+
+  <p>So bro, This is where we will have to Paste the CSV with columns for the Merkle(header required):<br>
+  <code>reserveId,quantity,fineWeightMg,serial,mine,barStandard,doc, mintedAtISO</code></p>
+
+  <textarea id="csv" rows="12" class="mono" placeholder="reserveId,quantity,fineWeightMg,serial,mine,barStandard,doc,mintedAtISO
+1,1000000000000000000,1000000,ABCD1234,SomeMine,LBMA:GD,ipfs://bafy...,1715606400"></textarea>
+
+  <button onclick="window.Merkle.build()">Build Merkle Root</button>
+
+  <h3>Outputs</h3>
+  <label>Root (0x…)</label>
+  <input id="root" class="mono" readonly/>
+
+  <label>Schema Hash (keccak256 of schema hint or empty)</label>
+  <input id="schemaHash" class="mono" readonly/>
+
+  <div class="row">
+    <button onclick="window.Merkle.downloadDataset()">Download dataset.json</button>
+    <button onclick="window.Merkle.downloadProofs()">Download proofs.json</button>
+    <button onclick="window.Merkle.downloadRoot()">Download root.txt</button>
+  </div>
+
+  <script src="./generator.js"></script>
+</body>
+</html>
