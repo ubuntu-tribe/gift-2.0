@@ -195,9 +195,46 @@ cargo build -p gift_bridge_solana
 
 This compiles the `gift_bridge_solana` program using `anchor-lang = 0.30.1` and `anchor-spl = 0.30.1`.
 
-> Note: The installed `anchor-cli` version may be newer than `anchor-lang`. If you regenerate IDLs with
-> `anchor build`, ensure your CLI and `anchor-lang` versions are compatible (or pin via `[toolchain]`
-> in `Anchor.toml`).
+> Note:
+> - The installed `anchor-cli` version on your machine may be newer than `anchor-lang`. If you regenerate IDLs
+>   with `anchor build`, ensure your CLI and `anchor-lang` versions are compatible (or pin via `[toolchain]`
+>   in `Anchor.toml`).
+
+---
+
+## How to run Solana tests
+
+Solana tests are implemented as **TypeScript integration tests** that talk to a local validator or
+devnet using the Anchor TS client.
+
+From the repo root:
+
+```bash
+npm install          # or pnpm install / yarn
+npm run test:solana
+```
+
+Before running:
+
+- Ensure a Solana cluster + wallet are configured:
+  - `ANCHOR_PROVIDER_URL` – RPC URL (e.g. local `solana-test-validator` or devnet).
+  - `ANCHOR_WALLET` – path to a funded keypair JSON file.
+- Deploy the `gift_bridge_solana` program (ID must match `Brdg111111111111111111111111111111111111111`).
+- Initialize the Solana side using the helper scripts:
+  - `scripts/solana/createGiftSolMint.ts` – creates the GIFT_SOL SPL mint.
+  - `scripts/solana/deployBridgeProgram.ts` – creates the Config PDA and wires admin/mint/Polygon bridge.
+
+Then set:
+
+- `GIFT_SOL_MINT` to the GIFT_SOL mint address.
+- `GIFT_BRIDGE_CONFIG` to the Config PDA address.
+
+The tests in `tests/solana/gift_bridge_solana.test.ts` will then:
+
+- Read and validate the `Config` account wiring.
+- Add and remove an extra authorized minter.
+- Mint GIFT_SOL from a fake Polygon deposit (`mintFromPolygon`), then burn part of it
+  (`burnForPolygon`) and check balances.
 
 ---
 

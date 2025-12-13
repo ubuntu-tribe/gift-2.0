@@ -18,4 +18,6 @@ wallet = "~/.config/solana/id.json"
 [workspace]
 members = ["programs/gift_bridge_solana"]
 
+[toolchain]
+anchor_version = "0.30.1"
 
