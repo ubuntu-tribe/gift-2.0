@@ -1,0 +1,21 @@
+[features]
+seeds = false
+skip-lint = false
+
+[programs.localnet]
+gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+
+[programs.devnet]
+gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
+
+[workspace]
+members = ["programs/gift_bridge_solana"]
+
+

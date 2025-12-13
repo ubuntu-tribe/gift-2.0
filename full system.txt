@@ -1,0 +1,2985 @@
+HIGH-LEVEL SYSTEM OVERVIEW
+==========================
+
+This file contains all on-chain contracts and Solana client scripts that are currently
+part of the GIFT system, focused on Polygon (canonical chain) and Solana (bridge side).
+
+POLYGON (canonical chain)
+-------------------------
+- contracts/polygon/GIFT.sol
+  Main ERC20Upgradeable token (1 GIFT = 1 mg of gold).
+  - Controlled by supplyController/supplyManager for mint/burn.
+  - Applies outbound transfer taxes via GIFTTaxManager (tiered tax).
+  - Supports delegated transfers via signatures.
+
+- contracts/polygon/GIFTPoR.sol
+  Proof-of-Reserve ledger for physical vaults and digital reserves.
+  - Tracks vaults, physical balances, digital reserves, and per-minter minting allowances.
+  - Roles: auditors, admins, minters; only minters can update reserve after minting.
+
+- contracts/polygon/GIFTTaxManager.sol
+  Tax configuration contract for GIFT transfers.
+  - Stores tier thresholds and tax percentages; manages fee exclusions and LP flags.
+  - Inbound transfers are currently globally exempt (no inbound tax).
+
+- contracts/polygon/MintingUpgradeable.sol
+  Upgradeable minting engine for GIFT.
+  - Wires GIFT, GIFTPoR, and GIFTBatchRegistry (Merkle-based provenance).
+  - mintWithProof(): enforces PoR allowances + vault reserves + batch caps, then mints GIFT.
+  - mint(): optional legacy path without registry when registryEnforced is false.
+  - Also exposes burnFrom() and burnEscrowBalance() to burn GIFT under admin/escrow control.
+
+- contracts/polygon/GIFTBarNFTDeferred.sol
+  ERC721 NFT representing physical bars of gold.
+  - Integrates with GIFTBatchRegistry to limit NFT capacity per Merkle leaf.
+  - Each NFT encodes batchId, reserveId, hashes, and mg weight (unitMg).
+  - Owner (eventually escrow) can mintBarsFromLeaf() and burn() tokens.
+
+- contracts/polygon/GiftRedemptionEscrowUpgradeable.sol
+  Upgradeable escrow that locks GIFT when NFTs are sold and burns tokens on redemption.
+  - lockGiftForNFT(): marketplace locks GIFT against a specific (nftContract, tokenId).
+  - onERC721Received(): user sends NFT to escrow to request physical redemption.
+  - completeRedemption(): burns locked GIFT via MintingUpgradeable and burns/cages the NFT.
+
+- contracts/polygon/GiftPolygonBridge.sol
+  Pooled bridge contract on Polygon that locks GIFT backing GIFT_SOL on Solana.
+  - depositToSolana(): locks GIFT and emits DepositedToSolana for the off-chain relayer.
+  - completeWithdrawalFromSolana(): onlyRelayer; releases GIFT when a Solana burn is proven.
+
+- contracts/polygon/Europe/EUTransferAgent.sol
+  Regional transfer agent for compliance-filtered GIFT flows (push-only relay).
+  - Enforces blacklists, daily caps, SAR thresholds, and delayed/frozen transfers.
+  - Roles: COMPLIANCE, PAUSE, JUDICIAL for managing tickets, freezes, and confiscations.
+
+SOLANA (bridge side)
+--------------------
+- programs/gift_bridge_solana/src/lib.rs
+  Anchor program that mints/burns GIFT_SOL corresponding to locked GIFT on Polygon.
+  - initializeConfig(): creates a Config PDA with admin, GIFT_SOL mint, and Polygon bridge address.
+  - addMinter/removeMinter(): admin-managed list of additional authorized minters (e.g. multisigs).
+  - mintFromPolygon(): admin or extra minter mints GIFT_SOL for a Polygon deposit, with replay protection via ProcessedDeposit PDA.
+  - burnForPolygon(): user burns GIFT_SOL and emits BurnForPolygonEvent for the relayer/Polygon bridge.
+
+- idl/gift_bridge_solana.json
+  IDL describing the gift_bridge_solana program (instructions, accounts, events, errors).
+
+- Anchor.toml / Cargo.toml / programs/gift_bridge_solana/Cargo.toml / Anchor.toml
+  Anchor workspace + program configuration, including program ID and cluster/wallet settings.
+
+SOLANA TS CLIENTS / SCRIPTS
+----------------------------
+- scripts/solana/createGiftSolMint.ts
+  Helper script to create the GIFT_SOL SPL mint (18 decimals) and mint a test balance.
+
+- scripts/solana/deployBridgeProgram.ts
+  Uses the IDL + Anchor provider to call initializeConfig() and set up the Config PDA on Solana.
+
+- scripts/solana/bridgeClient.ts
+  Test/relayer-style client that:
+  - Derives mint_authority and processed_deposit PDAs.
+  - Calls mintFromPolygon() to mint GIFT_SOL for a fake deposit.
+  - Calls burnForPolygon() to burn and emit BurnForPolygonEvent.
+
+The rest of this file reproduces the **full source code** of each of the files above:
+first all Polygon contracts, then Solana program + IDL, then TS scripts.
+
+FULL SYSTEM TREE AND SOURCES
+============================
+
+Root: /home/kassi/ubuntu-home/full-utribe-contracts
+
+POLYGON CONTRACTS (ROOT)
+------------------------
+
+FILE: contracts/polygon/GIFT.sol
+----------------------------------------
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "./GIFTTaxManager.sol";
+
+contract GIFT is
+    Initializable,
+    ERC20Upgradeable,
+    PausableUpgradeable,
+    OwnableUpgradeable,
+    UUPSUpgradeable
+{
+    using SafeMathUpgradeable for uint256;
+
+    address public supplyController;
+    address public supplyManager;
+
+    AggregatorV3Interface private reserveFeed;
+    GIFTTaxManager public taxManager;
+
+    mapping(address => bool) public isManager;
+    mapping(address => uint256) public nonces;
+
+
+    event NewSupplyController(address indexed newSupplyController);
+    event NewSupplyManager(address indexed newSupplyManager);
+    event TaxManagerUpdated(address indexed newTaxManager);
+    event DelegateTransfer(
+        address sender,
+        address delegator,
+        address receiver,
+        uint256 amount
+    );
+
+    event ManagerUpdated(address indexed manager, bool isManager);
+
+    modifier onlySupplyController() {
+        require(
+            msg.sender == supplyController,
+            "GIFT: Caller is not the supply controller"
+        );
+        _;
+    }
+
+    modifier onlySupplyManager() {
+        require(
+            msg.sender == supplyManager,
+            "GIFT: Caller is not the supply manager"
+        );
+        _;
+    }
+
+    modifier onlyManager() {
+        require(isManager[msg.sender], "GIFT: Caller is not a manager");
+        _;
+    }
+
+    function initialize(address _aggregatorInterface, address _initialHolder, address _taxManager)
+        public
+        reinitializer(2)
+    {
+        __ERC20_init("GIFT", "GIFT");
+        __Pausable_init();
+        __Ownable_init(_msgSender());
+        __UUPSUpgradeable_init();
+
+        taxManager = GIFTTaxManager(_taxManager);
+        reserveFeed = AggregatorV3Interface(_aggregatorInterface);
+    }
+
+    function computeTaxUsingManager(uint256 _transferAmount) internal view returns (uint256) {
+        uint256 taxPercentage;
+        (uint256 tierOneMax, uint256 tierTwoMax, uint256 tierThreeMax, uint256 tierFourMax) = taxManager.getTaxTiers();
+        (uint256 tierOneTax, uint256 tierTwoTax, uint256 tierThreeTax, uint256 tierFourTax, uint256 tierFiveTax) = taxManager.getTaxPercentages();
+
+        if (_transferAmount <= tierOneMax) {
+            taxPercentage = tierOneTax;
+        } else if (_transferAmount <= tierTwoMax) {
+            taxPercentage = tierTwoTax;
+        } else if (_transferAmount <= tierThreeMax) {
+            taxPercentage = tierThreeTax;
+        } else if (_transferAmount <= tierFourMax) {
+            taxPercentage = tierFourTax;
+        } else {
+            taxPercentage = tierFiveTax;
+        }
+
+        return _transferAmount.mul(taxPercentage).div(100000);
+    }
+
+    function getChainID() public view returns (uint256) {
+        uint256 id;
+        assembly {
+            id := chainid()
+        }
+        return id;
+    }
+
+    function delegateTransferProof(
+        bytes32 token,
+        address delegator,
+        address spender,
+        uint256 amount,
+        uint256 networkFee
+    ) public view returns (bytes32) {
+        return
+            keccak256(
+                abi.encodePacked(
+                    getChainID(),
+                    token,
+                    amount,
+                    delegator,
+                    spender,
+                    networkFee
+                )
+            );
+    }
+
+    function setSupplyController(address _newSupplyController)
+        external
+        onlyOwner
+    {
+        require(
+            _newSupplyController != address(0),
+            "GIFT: Cannot set supply controller to address zero"
+        );
+        supplyController = _newSupplyController;
+        emit NewSupplyController(supplyController);
+    }
+
+    function setSupplyManager(address _newSupplyManager) external onlyOwner {
+        require(
+            _newSupplyManager != address(0),
+            "GIFT: Cannot set supply manager to address zero"
+        );
+        supplyManager = _newSupplyManager;
+        emit NewSupplyManager(supplyManager);
+    }
+
+    /**
+     * Minting and Burn functions
+     */
+
+    function inflateSupply(uint256 _value)
+        external
+        onlySupplyManager
+        returns (bool)
+    {
+        _mint(supplyManager, _value);
+        return true;
+    }
+
+    function increaseSupply(address _userAddress, uint256 _value)
+        external
+        onlySupplyController
+        returns (bool)
+    {
+        _mint(_userAddress, _value);
+        return true;
+    }
+
+    function redeemGold(address _userAddress, uint256 _value)
+        external
+        onlySupplyController
+        returns (bool)
+    {
+        _burn(_userAddress, _value);
+        return true;
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    function setManager(address _manager, bool _isManager) external onlyOwner {
+        isManager[_manager] = _isManager;
+        emit ManagerUpdated(_manager, _isManager);
+    }
+
+    function transfer(address recipient, uint256 amount)
+        public
+        virtual
+        override
+        whenNotPaused
+        returns (bool)
+    {
+        return _transferGIFT(_msgSender(), recipient, amount);
+    }
+
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) public virtual override whenNotPaused returns (bool) {
+        bool success = _transferGIFT(sender, recipient, amount);
+        uint256 currentAllowance = allowance(sender, _msgSender());
+        require(
+            currentAllowance >= amount,
+            "GIFT: Transfer amount exceeds allowance"
+        );
+        unchecked {
+            _approve(sender, _msgSender(), currentAllowance - amount);
+        }
+        return success;
+    }
+
+    function recoverSigner(bytes32 message, bytes memory signature)
+        internal
+        pure
+        returns (address)
+    {
+        require(signature.length == 65, "GIFT: Invalid signature length");
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(signature, 32))
+            s := mload(add(signature, 64))
+            v := byte(0, mload(add(signature, 96)))
+        }
+        if (v < 27) v += 27;
+        require(v == 27 || v == 28, "GIFT: Invalid signature 'v' value");
+        return
+            ecrecover(
+                keccak256(
+                    abi.encodePacked(
+                        "\x19Ethereum Signed Message:\n32",
+                        message
+                    )
+                ),
+                v,
+                r,
+                s
+            );
+    }
+
+    function delegateTransfer(
+        bytes memory signature,
+        address delegator,
+        address recipient,
+        uint256 amount,
+        uint256 networkFee
+    ) external whenNotPaused onlyManager returns (bool) {
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                this,
+                delegator,
+                recipient,
+                amount,
+                networkFee,
+                nonces[delegator]++
+            )
+        );
+        address signer = recoverSigner(message, signature);
+        require(signer == delegator, "GIFT: Invalid signature");
+
+        _transfer(delegator, msg.sender, networkFee);
+        bool success = _transferGIFT(delegator, recipient, amount);
+        emit DelegateTransfer(msg.sender, delegator, recipient, amount);
+        return success;
+    }
+
+    function _transferGIFT(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) internal virtual returns (bool) {
+        uint256 tax = 0;
+        // Check for outbound fees (sender perspective)
+        if (
+            !taxManager.isExcludedFromOutboundFees(sender) && !taxManager._isLiquidityPool(recipient)
+        ) {
+            uint256 outboundTax = computeTaxUsingManager(amount);
+            tax += outboundTax;
+            _transfer(sender, taxManager.beneficiary(), outboundTax);
+        }
+
+        // Check for inbound fees (recipient perspective)
+        if (
+            !taxManager.isExcludedFromInboundFees(recipient) && !taxManager._isLiquidityPool(sender)
+        ) {
+            uint256 inboundTax = computeTaxUsingManager(amount - tax); // Calculate tax on remaining amount
+            tax += inboundTax;
+            _transfer(sender, taxManager.beneficiary(), inboundTax);
+        }
+
+        // Transfer the remaining amount after taxes
+        _transfer(sender, recipient, amount - tax);
+        return true;
+    }
+
+    function setTaxManager(address _newTaxManager) external onlyOwner {
+        require(_newTaxManager != address(0), "GIFT: New tax manager cannot be the zero address");
+        taxManager = GIFTTaxManager(_newTaxManager);
+        emit TaxManagerUpdated(_newTaxManager);
+    }
+
+    function _authorizeUpgrade(address) internal override onlyOwner {}
+
+    function decimals()
+        public
+        view
+        virtual
+        override(ERC20Upgradeable)
+        returns (uint8)
+    {
+        return super.decimals();
+    }
+}
+FILE: contracts/polygon/GIFTPoR.sol
+----------------------------------------
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+// Importing necessary components from OpenZeppelin's upgradeable contracts library.
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+
+// Declaring the contract, inheriting from OpenZeppelin's Initializable, AccessControlUpgradeable, and UUPSUpgradeable to enable upgradeability and access control.
+contract GIFTPoR is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    // Variable to keep track of reserves.
+    uint256 public GIFT_reserve;
+
+    // Structure to represent a vault with a name and an amount.
+    struct Vault {
+        uint256 id;
+        string name;
+        uint256 amount;
+    }
+
+    struct ReserveAllowance {
+        uint256 reserveId;
+        uint256 allowance;
+    }
+
+    // Mapping to store PhysicalVaultReserves by vault ID
+    mapping(address => uint256[]) public minterReserves;
+    mapping(address => mapping(uint256 => uint256)) public mintAllowances;
+
+    // Array to store multiple vaults and Vaults by ID.
+    Vault[] public vaults;
+
+    mapping(uint256 => Vault) public vaultsById;
+    mapping(address => bool) public auditors;
+    mapping(address => bool) public admins;
+    mapping(address => bool) public minters;
+
+    // Variable to keep track of the next vault ID.
+    // A new variable nextVaultId is introduced to keep track of the next available vault ID.
+    // It is initialized to 1 in the initialize function.
+    uint256 public nextVaultId;
+
+    // **Add new struct and mapping after existing variables**
+    struct PhysicalVaultReserve {
+        uint256 id;
+        string name;
+        uint256 amount;
+    }
+
+    mapping(uint256 => PhysicalVaultReserve) public physicalVaultsById;
+
+    uint256[50] private __gap;
+
+
+    // Events for logging actions within the contract.
+    event UpdateReserve(uint256 GIFT_reserve, address indexed sender);
+    event SetMintAllowance(
+        address indexed minter,
+        uint256 reserveId,
+        uint256 allowance
+    );
+    event VaultAdded(uint256 indexed vaultId, string name);
+    event AuditorAdded(address indexed auditor);
+    event AuditorRemoved(address indexed auditor);
+    event AdminAdded(address indexed admin);
+    event AdminRemoved(address indexed admin);
+    event MinterAdded(address indexed minter);
+    event MinterRemoved(address indexed minter);
+    event VaultCreated(
+        uint256 vaultId,
+        string vaultName,
+        uint256 amountAdded,
+        uint256 totalAmount
+    );
+    event VaultUpdated(
+        uint256 vaultId,
+        string vaultName,
+        uint256 amountAdded,
+        uint256 totalAmount,
+        string comment
+    );
+    event VaultUpdatedaftermint(
+        uint256 vaultId,
+        string vaultName,
+        uint256 amountAdded,
+        uint256 totalAmount
+    );
+    // Event for moving supply between vaults
+    event MoveSupply(
+        uint256 indexed fromVaultId,
+        uint256 indexed toVaultId,
+        uint256 amount,
+        string comment,
+        address indexed auditor
+    );
+    // Event emitted when supply is added to PhysicalVaultReserve
+    event PhysicalVaultSupplyAdded(
+        uint256 indexed vaultId,
+        string vaultName,
+        uint256 amountAdded,
+        uint256 totalAmount,
+        string comment,
+        address indexed auditor
+    );
+
+    // Event emitted when supply is removed from PhysicalVaultReserve
+    event PhysicalVaultSupplyRemoved(
+        uint256 indexed vaultId,
+        string vaultName,
+        uint256 amountRemoved,
+        uint256 totalAmount,
+        string comment,
+        address indexed auditor
+    );
+
+    // Initialization function to replace the constructor
+    function initialize() public initializer {
+        __Ownable_init(msg.sender);
+        __UUPSUpgradeable_init();
+
+        // Grants roles to the message sender and a specified upgrader.
+        auditors[msg.sender] = true;
+        admins[msg.sender] = true;
+        minters[msg.sender] = true;
+
+        // Initialize the next vault ID to 1.
+        nextVaultId = 1;
+    }
+
+    // Modifier to restrict access to functions that only auditors can call.
+    // Ensures the caller is an auditor by checking the auditors mapping.
+    modifier onlyAuditor() {
+        require(auditors[msg.sender], "Caller is not an auditor");
+        _;
+    }
+    // Modifier to restrict access to functions that only admins can call.
+    // Ensures the caller is an admin by checking the admins mapping.
+    modifier onlyAdmin() {
+        require(admins[msg.sender], "Caller is not an admin");
+        _;
+    }
+    // Modifier to restrict access to functions that only minters can call.
+    // Ensures the caller is a minter by checking the minters mapping.
+    modifier onlyMinter() {
+        require(minters[msg.sender], "Caller is not a minter");
+        _;
+    }
+
+    // Function to add a new auditor.
+    // Only the contract owner can call this function.
+    // Adds the provided address to the auditors list and emits the AuditorAdded event.
+    function addAuditor(address _auditor) external onlyOwner {
+        auditors[_auditor] = true;
+        emit AuditorAdded(_auditor);
+    }
+
+    // Function to remove an auditor.
+    // Only the contract owner can call this function.
+    // Removes the provided address from the auditors list and emits the AuditorRemoved event.
+    function removeAuditor(address _auditor) external onlyOwner {
+        auditors[_auditor] = false;
+        emit AuditorRemoved(_auditor);
+    }
+
+    // Function to add a new admin.
+    // Only the contract owner can call this function.
+    // Adds the provided address to the admins list and emits the AdminAdded event.
+    function addAdmin(address _admin) external onlyOwner {
+        admins[_admin] = true;
+        emit AdminAdded(_admin);
+    }
+
+    // Function to remove an admin.
+    // Only the contract owner can call this function.
+    // Removes the provided address from the admins list and emits the AdminRemoved event.
+    function removeAdmin(address _admin) external onlyOwner {
+        admins[_admin] = false;
+        emit AdminRemoved(_admin);
+    }
+
+    // Internal function to authorize upgrades to a new implementation contract.
+    // Only admins can authorize upgrades.
+    // This function is required for upgradeability using OpenZeppelin's UUPS pattern.
+    function _authorizeUpgrade(address newImplementation)
+        internal
+        override
+        onlyAdmin
+    {}
+
+    // Function to add a new vault.
+    // Only admins can add new vaults.
+    // The function creates a vault with the given name and initializes its amount to 0.
+    // The vault is added to the vaults array, and the next vault ID is incremented.
+    // Emits a VaultCreated event.
+    function addVault(string memory _name) public onlyAdmin {
+        uint256 vaultId = nextVaultId;
+        Vault memory newVault = Vault({id: vaultId, name: _name, amount: 0});
+        vaults.push(newVault);
+        vaultsById[vaultId] = newVault;
+        nextVaultId++;
+
+        // Initialize the PhysicalVaultReserve for this vault
+        PhysicalVaultReserve memory newPhysicalVault = PhysicalVaultReserve({
+            id: vaultId,
+            name: _name,
+            amount: 0
+        });
+
+        physicalVaultsById[vaultId] = newPhysicalVault;
+
+        emit VaultCreated(vaultId, _name, 0, 0);
+    }
+
+    // Function to retrieve the state of a specific vault by ID.
+    // Returns the vault's name, ID, and current balance.
+    // Requires a valid vault ID, otherwise it reverts with an error.
+    function getReserveState(uint256 _vaultId)
+        public
+        view
+        returns (
+            string memory reserveName,
+            uint256 reserveId,
+            uint256 balance
+        )
+    {
+        require(_vaultId > 0 && _vaultId < nextVaultId, "Invalid vault ID");
+        Vault memory vault = vaultsById[_vaultId];
+        return (vault.name, vault.id, vault.amount);
+    }
+
+    // @dev Updates the amount in a vault.
+    //A comment is required to describe the purpose of the update.
+
+    // @param _vaultId The ID of the vault to be updated.
+    //@param _amountAdded The amount to be added to the vault.
+    //@param comment A string comment explaining the reason for the update.
+
+    function updateVault(
+        uint256 _vaultId,
+        uint256 _amountAdded,
+        string memory comment
+    ) public onlyAuditor {
+        require(_vaultId > 0 && _vaultId < nextVaultId, "Invalid vault ID");
+
+        Vault storage vault = vaultsById[_vaultId];
+        require(bytes(vault.name).length > 0, "Vault does not exist");
+
+        vault.amount += _amountAdded;
+        vaultsById[_vaultId].amount = vault.amount;
+        // Update the physical vault reserve amount
+        physicalVaultsById[_vaultId].amount += _amountAdded;
+
+        GIFT_reserve += _amountAdded;
+
+        emit VaultUpdated(
+            _vaultId,
+            vault.name,
+            _amountAdded,
+            vault.amount,
+            comment
+        );
+        emit UpdateReserve(GIFT_reserve, msg.sender);
+    }
+
+    /**
+     * @dev Function to add supply to the PhysicalVaultReserve of a vault.
+     * This function increases the physical amount stored in the vault.
+     * Requires a comment explaining the reason for the addition.
+     *
+     * @param vaultId The ID of the vault to which the amount will be added.
+     * @param amount The amount to be added to the physical vault reserve.
+     * @param comment A string comment explaining the reason for the addition.
+     */
+    function SupplyGold(
+        uint256 vaultId,
+        uint256 amount,
+        string memory comment
+    ) public onlyAuditor {
+        // Validate that the vault exists
+        require(vaultId > 0 && vaultId < nextVaultId, "Invalid vault ID");
+
+        // Fetch the physical vault
+        PhysicalVaultReserve storage physicalVault = physicalVaultsById[
+            vaultId
+        ];
+
+        // Ensure the vault exists
+        require(
+            bytes(physicalVault.name).length > 0,
+            "Physical vault does not exist"
+        );
+
+        // Add the amount to the physical vault reserve
+        physicalVault.amount += amount;
+
+        // Emit an event logging the addition
+        emit PhysicalVaultSupplyAdded(
+            vaultId,
+            physicalVault.name,
+            amount,
+            physicalVault.amount,
+            comment,
+            msg.sender
+        );
+    }
+
+    /**
+     * @dev Function to remove supply from the PhysicalVaultReserve of a vault.
+     * This function decreases the physical amount stored in the vault.
+     * Requires a comment explaining the reason for the removal.
+     *
+     * @param vaultId The ID of the vault from which the amount will be removed.
+     * @param amount The amount to be removed from the physical vault reserve.
+     * @param comment A string comment explaining the reason for the removal.
+     */
+    function RedeemGold(
+        uint256 vaultId,
+        uint256 amount,
+        string memory comment
+    ) public onlyAuditor {
+        // Validate that the vault exists
+        require(vaultId > 0 && vaultId < nextVaultId, "Invalid vault ID");
+
+        // Fetch the physical vault
+        PhysicalVaultReserve storage physicalVault = physicalVaultsById[
+            vaultId
+        ];
+
+        // Ensure the vault exists
+        require(
+            bytes(physicalVault.name).length > 0,
+            "Physical vault does not exist"
+        );
+
+        // Ensure the vault has enough amount to redeem
+        require(
+            physicalVault.amount >= amount,
+            "Insufficient physical reserve balance"
+        );
+
+        // Subtract the amount from the physical vault reserve
+        physicalVault.amount -= amount;
+
+        // Emit an event logging the removal
+        emit PhysicalVaultSupplyRemoved(
+            vaultId,
+            physicalVault.name,
+            amount,
+            physicalVault.amount,
+            comment,
+            msg.sender
+        );
+    }
+
+    /**
+     * @dev Function to move an amount from one vault to another.
+     * This function does not change the total reserve, only shifts funds between vaults.
+     * It requires a comment explaining the reason for the transfer.
+     *
+     * @param fromVaultId The ID of the vault from which the amount will be moved.
+     * @param toVaultId The ID of the vault to which the amount will be moved.
+     * @param amount The amount to be transferred between the vaults.
+     * @param comment A string comment explaining the reason for the transfer.
+     */
+    function moveSupply(
+        uint256 fromVaultId,
+        uint256 toVaultId,
+        uint256 amount,
+        string memory comment
+    ) external onlyAuditor {
+        // Validate that both vaults exist
+        require(
+            fromVaultId > 0 && fromVaultId < nextVaultId,
+            "Invalid from vault ID"
+        );
+        require(
+            toVaultId > 0 && toVaultId < nextVaultId,
+            "Invalid to vault ID"
+        );
+
+        // Fetch both vaults
+        Vault storage fromVault = vaultsById[fromVaultId];
+        Vault storage toVault = vaultsById[toVaultId];
+
+        // Ensure the from vault has enough balance
+        require(
+            fromVault.amount >= amount,
+            "Insufficient balance in from vault"
+        );
+
+        // Move the amount from vault 1 to vault 2
+        fromVault.amount -= amount;
+        toVault.amount += amount;
+
+        PhysicalVaultReserve storage physicalFromVault = physicalVaultsById[
+            fromVaultId
+        ];
+        PhysicalVaultReserve storage physicalToVault = physicalVaultsById[
+            toVaultId
+        ];
+
+        // Ensure the from physical vault has enough balance
+        require(
+            physicalFromVault.amount >= amount,
+            "Insufficient physical balance in from vault"
+        );
+
+        // Move the amount in the physical vault reserves
+        physicalFromVault.amount -= amount;
+        physicalToVault.amount += amount;
+
+        // Emit an event logging the move, including the comment
+        emit MoveSupply(fromVaultId, toVaultId, amount, comment, msg.sender);
+    }
+
+    // Function to retrieve the total number of vaults and the total reserve amount.
+    // Returns the total number of vaults and the total reserve amount in the system.
+    function getTotalReserves()
+        public
+        view
+        returns (uint256 totalReserves, uint256 totalAmount)
+    {
+        totalReserves = nextVaultId - 1; // Assuming vaultIds start from 1
+        totalAmount = GIFT_reserve;
+        return (totalReserves, totalAmount);
+    }
+
+    // Function to retrieve the total reserve amount in the system.
+    // Returns the total reserve without referencing specific vaults.
+    function retrieveReserve() public view returns (uint256) {
+        return GIFT_reserve;
+    }
+
+    // Function to add a new minter.
+    // Only admins can add minters.
+    // The function adds the provided address to the minters list and emits the MinterAdded event.
+
+    function addMinter(address minter) public onlyAdmin {
+        minters[minter] = true;
+        emit MinterAdded(minter);
+    }
+
+    // Function to remove a minter.
+    // Only admins can remove minters.
+    // The function removes the provided address from the minters list and emits the MinterRemoved event.
+
+    function removeMinter(address minter) public onlyAdmin {
+        minters[minter] = false;
+        emit MinterRemoved(minter);
+    }
+
+    // Function to set the minting allowance for a specific minter and reserve.
+    // Only admins can set minting allowances.
+    // If the reserve is not already assigned to the minter, it is added to their list.
+    // The allowance is set in the mintAllowances mapping and the SetMintAllowance event is emitted.
+
+    function setMintingAllowance(
+        address minter,
+        uint256 reserveId,
+        uint256 allowance
+    ) external onlyAdmin {
+        require(reserveId > 0 && reserveId < nextVaultId, "Invalid reserve ID");
+
+        // Check if the reserve is already assigned to the minter
+        bool reserveExists = false;
+        for (uint256 i = 0; i < minterReserves[minter].length; i++) {
+            if (minterReserves[minter][i] == reserveId) {
+                reserveExists = true;
+                break;
+            }
+        }
+
+        // If the reserve doesn't exist for this minter, add it
+        if (!reserveExists) {
+            minterReserves[minter].push(reserveId);
+        }
+
+        // Set the allowance for this minter and reserve
+        mintAllowances[minter][reserveId] = allowance;
+
+        emit SetMintAllowance(minter, reserveId, allowance);
+    }
+
+    // Function to get the list of reserves and allowances for a specific minter.
+    // Returns an array of ReserveAllowance structures containing reserve IDs and their respective allowances.
+
+    function getMinterReservesAndAllowances(address minter)
+        public
+        view
+        returns (ReserveAllowance[] memory)
+    {
+        uint256[] memory reserves = minterReserves[minter];
+        ReserveAllowance[] memory reserveAllowances = new ReserveAllowance[](
+            reserves.length
+        );
+
+        for (uint256 i = 0; i < reserves.length; i++) {
+            uint256 reserveId = reserves[i];
+            uint256 allowance = mintAllowances[minter][reserveId];
+            reserveAllowances[i] = ReserveAllowance(reserveId, allowance);
+        }
+
+        return reserveAllowances;
+    }
+
+    // Function to check if an account is a registered minter.
+    // Returns true if the account is a minter, false otherwise.
+    function isMinter(address account) public view returns (bool) {
+        return minters[account];
+    }
+
+    // Function to update the reserve balance of a vault after minting.
+    // Only minters can update the reserve after minting.
+    // The function decreases the vault's balance by the minted amount and emits the VaultUpdated event.
+
+    function updateReserveAfterMint(uint256 _vaultId, uint256 _amount)
+        external
+        onlyMinter
+    {
+        require(_vaultId > 0 && _vaultId < nextVaultId, "Invalid vault ID");
+        Vault storage vault = vaultsById[_vaultId];
+        require(vault.amount >= _amount, "Insufficient reserve balance");
+
+        vault.amount -= _amount;
+
+        emit VaultUpdatedaftermint(_vaultId, vault.name, _amount, vault.amount);
+    }
+}
+FILE: contracts/polygon/GIFTTaxManager.sol
+----------------------------------------
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
+
+
+contract GIFTTaxManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
+    using SafeMathUpgradeable for uint256;
+
+    address public taxOfficer;
+    address public beneficiary;
+
+    uint256 public tierOneTaxPercentage;
+    uint256 public tierTwoTaxPercentage;
+    uint256 public tierThreeTaxPercentage;
+    uint256 public tierFourTaxPercentage;
+    uint256 public tierFiveTaxPercentage;
+
+    uint256 public tierOneMax;
+    uint256 public tierTwoMax;
+    uint256 public tierThreeMax;
+    uint256 public tierFourMax;
+
+    mapping(address => bool) public isExcludedFromOutboundFees;
+    mapping(address => bool) public _isLiquidityPool;
+
+    event UpdateTaxPercentages(
+        uint256 tierOneTaxPercentage,
+        uint256 tierTwoTaxPercentage,
+        uint256 tierThreeTaxPercentage,
+        uint256 tierFourTaxPercentage,
+        uint256 tierFiveTaxPercentage
+    );
+
+    event UpdateTaxTiers(
+        uint256 tierOneMax,
+        uint256 tierTwoMax,
+        uint256 tierThreeMax,
+        uint256 tierFourMax
+    );
+
+    event NewTaxOfficer(address indexed newTaxOfficer);
+    event NewBeneficiary(address indexed newBeneficiary);
+    event FeeExclusionSet(
+        address indexed account,
+        bool isExcludedOutbound,
+        bool isExcludedInbound
+    );
+    event LiquidityPoolSet(address indexed account, bool isPool);
+
+    modifier onlyTaxOfficer() {
+        require(msg.sender == taxOfficer, "GIFTTaxManager: Caller is not the tax officer");
+        _;
+    }
+
+    modifier onlyOwnerOrTaxOfficer() {
+        require(
+            msg.sender == owner() || msg.sender == taxOfficer,
+            "GIFTTaxManager: Caller is not the owner or tax officer"
+        );
+        _;
+    }
+
+    function initialize() public initializer {
+        __Ownable_init(_msgSender());
+        __UUPSUpgradeable_init();
+
+        isExcludedFromOutboundFees[owner()] = true;
+
+        tierOneTaxPercentage = 1618;
+        tierTwoTaxPercentage = 1200;
+        tierThreeTaxPercentage = 1000;
+        tierFourTaxPercentage = 500;
+        tierFiveTaxPercentage = 300;
+
+        tierOneMax = 2000 * 10**18;
+        tierTwoMax = 10000 * 10**18;
+        tierThreeMax = 20000 * 10**18;
+        tierFourMax = 200000 * 10**18;
+    }
+
+    function isExcludedFromInboundFees(address) public pure returns (bool) {
+        return true; // Always return true, exempting all addresses from inbound taxes
+    }
+
+    function updateTaxPercentages(
+        uint256 _tierOneTaxPercentage,
+        uint256 _tierTwoTaxPercentage,
+        uint256 _tierThreeTaxPercentage,
+        uint256 _tierFourTaxPercentage,
+        uint256 _tierFiveTaxPercentage
+    ) external onlyOwnerOrTaxOfficer {
+        tierOneTaxPercentage = _tierOneTaxPercentage;
+        tierTwoTaxPercentage = _tierTwoTaxPercentage;
+        tierThreeTaxPercentage = _tierThreeTaxPercentage;
+        tierFourTaxPercentage = _tierFourTaxPercentage;
+        tierFiveTaxPercentage = _tierFiveTaxPercentage;
+        emit UpdateTaxPercentages(
+            tierOneTaxPercentage,
+            tierTwoTaxPercentage,
+            tierThreeTaxPercentage,
+            tierFourTaxPercentage,
+            tierFiveTaxPercentage
+        );
+    }
+
+    function updateTaxTiers(
+        uint256 _tierOneMax,
+        uint256 _tierTwoMax,
+        uint256 _tierThreeMax,
+        uint256 _tierFourMax
+    ) external onlyOwnerOrTaxOfficer {
+        tierOneMax = _tierOneMax;
+        tierTwoMax = _tierTwoMax;
+        tierThreeMax = _tierThreeMax;
+        tierFourMax = _tierFourMax;
+        emit UpdateTaxTiers(tierOneMax, tierTwoMax, tierThreeMax, tierFourMax);
+    }
+
+    function setTaxOfficer(address _newTaxOfficer) external onlyOwner {
+        require(
+            _newTaxOfficer != address(0),
+            "GIFTTaxManager: Cannot set tax officer to address zero"
+        );
+        taxOfficer = _newTaxOfficer;
+        emit NewTaxOfficer(taxOfficer);
+    }
+
+    function setBeneficiary(address _newBeneficiary) external onlyOwner {
+        require(
+            _newBeneficiary != address(0),
+            "GIFTTaxManager: Cannot set beneficiary to address zero"
+        );
+        beneficiary = _newBeneficiary;
+        emit NewBeneficiary(beneficiary);
+    }
+
+    function setFeeExclusion(
+        address _address,
+        bool _isExcludedOutbound,
+        bool _isExcludedInbound
+    ) external onlyOwnerOrTaxOfficer {
+        isExcludedFromOutboundFees[_address] = _isExcludedOutbound;
+        emit FeeExclusionSet(_address, _isExcludedOutbound, _isExcludedInbound);
+    }
+
+    function setLiquidityPool(address _liquidityPool, bool _isPool)
+        external
+        onlyOwner
+    {
+        _isLiquidityPool[_liquidityPool] = _isPool;
+        emit LiquidityPoolSet(_liquidityPool, _isPool);
+    }
+
+    function getTaxTiers() external view returns (uint256, uint256, uint256, uint256) {
+        return (tierOneMax, tierTwoMax, tierThreeMax, tierFourMax);
+    }
+
+    function getTaxPercentages() external view returns (uint256, uint256, uint256, uint256, uint256) {
+        return (tierOneTaxPercentage, tierTwoTaxPercentage, tierThreeTaxPercentage, tierFourTaxPercentage, tierFiveTaxPercentage);
+    }
+
+    function _authorizeUpgrade(address newImplementation)
+        internal
+        override
+        onlyOwner
+    {}
+}
+FILE: contracts/polygon/MintingUpgradeable.sol
+----------------------------------------
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "./GIFTPoR.sol";
+import "./GIFT.sol";
+import "./src/GIFTBatchRegistry.sol";
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+
+contract MintingUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgradeable {
+    GIFTPoR public giftpor;
+    GIFT    public gift;
+    GIFTBatchRegistry public registry;
+
+    bool public registryEnforced;                      // when true, all mints require proofs
+    mapping(uint256 => bool) public allowedBatches;    // optional allowlist
+
+    // Escrow contract that will hold locked GIFT for NFT redemptions
+    address public escrow;
+
+    event RegistrySet(address indexed registry);
+    event RegistryEnforced(bool on);
+    event BatchAllowed(uint256 indexed batchId, bool on);
+    event TokensMinted(address indexed to, uint256 amount, uint256 reserveId, uint256 batchId, bytes32 leafHash);
+    event EscrowSet(address indexed escrow);
+
+    // ---- Init / UUPS ----
+
+    function initialize(address giftPoR_, address giftToken_, address registry_) public initializer {
+        __Ownable_init(msg.sender);
+        __UUPSUpgradeable_init();
+
+        giftpor = GIFTPoR(giftPoR_);
+        gift    = GIFT(giftToken_);
+        if (registry_ != address(0)) {
+            registry = GIFTBatchRegistry(registry_);
+        }
+    }
+
+    function _authorizeUpgrade(address) internal override onlyOwner {}
+
+    // ---- Admin wiring ----
+
+    function setRegistry(address registry_) external onlyOwner {
+        registry = GIFTBatchRegistry(registry_);
+        emit RegistrySet(registry_);
+    }
+
+    function enforceRegistry(bool on) external onlyOwner {
+        registryEnforced = on;
+        emit RegistryEnforced(on);
+    }
+
+    function allowBatch(uint256 batchId, bool on) external onlyOwner {
+        allowedBatches[batchId] = on;
+        emit BatchAllowed(batchId, on);
+    }
+
+    /**
+     * @notice Configure the escrow contract that locks GIFT for NFT redemptions.
+     * Only the PoR owner may change this binding.
+     *
+     * Requirements:
+     *  - `escrow_` != address(0)
+     */
+    function setEscrow(address escrow_) external {
+        require(msg.sender == giftpor.owner(), "Minting: only PoR owner");
+        require(escrow_ != address(0), "Minting: zero escrow");
+        escrow = escrow_;
+        emit EscrowSet(escrow_);
+    }
+
+    // ---- Core mint with proof ----
+
+    function mintWithProof(
+        address to,
+        uint256 amount,
+        GIFTBatchRegistry.LeafInput calldata leaf,
+        bytes32[] calldata proof
+    ) external {
+        require(giftpor.isMinter(msg.sender), "Minting: caller not PoR minter");
+        require(amount > 0, "Minting: amount=0");
+        require(registryEnforced, "Minting: registry not enforced");
+        require(allowedBatches[leaf.batchId], "Minting: batch not allowed");
+
+        // 1) Reserve & allowance checks in PoR
+        GIFTPoR.ReserveAllowance[] memory ras = giftpor.getMinterReservesAndAllowances(msg.sender);
+        uint256 allowance = _findAllowance(ras, leaf.reserveId);
+        require(allowance >= amount, "Minting: exceeds allowance");
+
+        (, , uint256 reserveBalance) = giftpor.getReserveState(leaf.reserveId);
+        require(reserveBalance >= amount, "Minting: insufficient reserve");
+
+        // 2) Registry consume (locks provenance)
+        (bytes32 leafHash, bool ok) = registry.verifyLeaf(leaf, proof);
+        require(ok, "Minting: bad proof");
+        registry.consume(leaf, proof, amount, to);
+
+        // 3) Mint ERC20
+        gift.increaseSupply(to, amount);
+
+        // 4) Update PoR accounting
+        giftpor.setMintingAllowance(msg.sender, leaf.reserveId, allowance - amount);
+        giftpor.updateReserveAfterMint(leaf.reserveId, amount);
+
+        emit TokensMinted(to, amount, leaf.reserveId, leaf.batchId, leafHash);
+    }
+
+    // ---- Temporary migration path (optional) ----
+
+    function mint(address to, uint256 amount, uint256 reserveId) external {
+        require(!registryEnforced, "Minting: proof required");
+
+        require(giftpor.isMinter(msg.sender), "Minting: caller not PoR minter");
+        require(amount > 0, "Minting: amount=0");
+
+        GIFTPoR.ReserveAllowance[] memory ras = giftpor.getMinterReservesAndAllowances(msg.sender);
+        uint256 allowance = _findAllowance(ras, reserveId);
+        require(allowance >= amount, "Minting: exceeds allowance");
+
+        (, , uint256 reserveBalance) = giftpor.getReserveState(reserveId);
+        require(reserveBalance >= amount, "Minting: insufficient reserve");
+
+        gift.increaseSupply(to, amount);
+        giftpor.setMintingAllowance(msg.sender, reserveId, allowance - amount);
+        giftpor.updateReserveAfterMint(reserveId, amount);
+
+        emit TokensMinted(to, amount, reserveId, 0, bytes32(0));
+    }
+
+    // ---- Admin passthroughs you used before ----
+
+    /**
+     * @notice Burn tokens from an arbitrary account.
+     * Only PoR owner may use this direct burn path.
+     */
+    function burnFrom(address account, uint256 amount) external {
+        require(msg.sender == giftpor.owner(), "Minting: only PoR owner can burn");
+        gift.redeemGold(account, amount);
+    }
+
+    /**
+     * @notice Burn tokens specifically from the escrow's balance.
+     * Called by the escrow contract itself after a physical redemption completes.
+     *
+     * Requirements:
+     *  - msg.sender == escrow
+     *  - amount > 0
+     *  - GIFT.supplyController must be this MintingUpgradeable contract
+     *
+     * Effect:
+     *  - Calls `gift.redeemGold(escrow, amount)` and burns tokens from escrow's balance.
+     */
+    function burnEscrowBalance(uint256 amount) external {
+        require(msg.sender == escrow, "Minting: only escrow");
+        require(amount > 0, "Minting: amount=0");
+
+        gift.redeemGold(escrow, amount);
+    }
+
+    function updatePoR(address newPoR) external {
+        require(msg.sender == giftpor.owner(), "Minting: only PoR owner");
+        giftpor = GIFTPoR(newPoR);
+    }
+
+    function getAdmin() external view returns (address) {
+        return giftpor.owner();
+    }
+
+    function changeAdmin(address newAdmin) external {
+        require(msg.sender == giftpor.owner(), "Minting: only PoR owner");
+        require(newAdmin != address(0), "Minting: zero");
+        giftpor.transferOwnership(newAdmin);
+    }
+
+    // ---- Helpers ----
+
+    function _findAllowance(GIFTPoR.ReserveAllowance[] memory ras, uint256 reserveId) internal pure returns (uint256) {
+        for (uint256 i = 0; i < ras.length; i++) {
+            if (ras[i].reserveId == reserveId) return ras[i].allowance;
+        }
+        revert("Minting: reserve not assigned");
+    }
+}
+
+FILE: contracts/polygon/GIFTBarNFTDeferred.sol
+----------------------------------------
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
+import "./src/GIFTBatchRegistry.sol";
+
+contract GIFTBarNFTDeferred is ERC721, Ownable, ReentrancyGuard {
+    enum CapacityMode { LEAF_MAX, STRICT_CONSUMED }
+
+    GIFTBatchRegistry public immutable registry;
+
+    uint256 public unitMg = 1_000_000; // default 1 kg (1,000,000 mg)
+    CapacityMode public capacityMode = CapacityMode.LEAF_MAX;
+
+    // (batchId, leafHash) => minted units count
+    mapping(bytes32 => uint256) public unitsMinted;
+    uint256 public nextId = 1;
+    string public baseURI;
+
+    struct BarInfo {
+        uint256 batchId;
+        bytes32 leafHash;
+        uint256 reserveId;
+        uint256 unitMg;
+        bytes32 serialHash;
+        bytes32 mineHash;
+        bytes32 barStandardHash;
+        bytes32 docHash;
+    }
+    mapping(uint256 => BarInfo) public barInfo;
+
+    event BarsMinted(
+        uint256 indexed batchId,
+        bytes32 indexed leafHash,
+        uint256 reserveId,
+        uint256 units,
+        address to,
+        uint256 fromTokenId,
+        uint256 toTokenId
+    );
+    event UnitMgSet(uint256 mg);
+    event BaseURISet(string uri);
+    event CapacityModeSet(CapacityMode mode);
+
+    constructor(address registry_) ERC721("GIFT Gold Bar", "GIFTBAR") Ownable() {
+        registry = GIFTBatchRegistry(registry_);
+    }
+
+    // ---- Admin ----
+
+    function setUnitMg(uint256 mg) external onlyOwner {
+        require(mg > 0, "unitMg=0");
+        unitMg = mg;
+        emit UnitMgSet(mg);
+    }
+
+    function setBaseURI(string calldata uri) external onlyOwner {
+        baseURI = uri;
+        emit BaseURISet(uri);
+    }
+
+    function setCapacityMode(CapacityMode mode) external onlyOwner {
+        capacityMode = mode;
+        emit CapacityModeSet(mode);
+    }
+
+    /**
+     * @notice Burn a bar NFT permanently.
+     * Intended to be called by the escrow contract once it becomes owner().
+     */
+    function burn(uint256 tokenId) external onlyOwner {
+        _burn(tokenId);
+        delete barInfo[tokenId];
+    }
+
+    // ---- Views ----
+
+    function tokenURI(uint256 tokenId) public view override returns (string memory) {
+        string memory b = baseURI;
+        if (bytes(b).length == 0) return "";
+        BarInfo memory info = barInfo[tokenId];
+        return string(
+            abi.encodePacked(
+                b,
+                "/",
+                _u(info.batchId),
+                "/",
+                _hex(info.leafHash),
+                "/",
+                _u(tokenId),
+                ".json"
+            )
+        );
+    }
+
+    function remainingUnits(GIFTBatchRegistry.LeafInput calldata leaf, bytes32[] calldata proof)
+        external
+        view
+        returns (bytes32 leafHash, uint256 unitsLeft)
+    {
+        (leafHash, ) = registry.verifyLeaf(leaf, proof);
+        uint256 cap = _capacityUnits(leaf.batchId, leafHash, leaf.quantity, leaf.fineWeightMg);
+        uint256 minted = unitsMinted[_key(leaf.batchId, leafHash)];
+        unitsLeft = cap > minted ? cap - minted : 0;
+    }
+
+    // ---- Core ----
+
+    /// Mint `units` NFTs (each represents `unitMg` fine mg) from a verified leaf, anytime later.
+    function mintBarsFromLeaf(
+        address to,
+        uint256 units,
+        GIFTBatchRegistry.LeafInput calldata leaf,
+        bytes32[] calldata proof
+    ) external nonReentrant onlyOwner {
+        require(units > 0, "units=0");
+        (bytes32 leafHash, bool ok) = registry.verifyLeaf(leaf, proof);
+        require(ok, "bad merkle proof");
+
+        uint256 cap = _capacityUnits(leaf.batchId, leafHash, leaf.quantity, leaf.fineWeightMg);
+        bytes32 key = _key(leaf.batchId, leafHash);
+        uint256 minted = unitsMinted[key];
+        require(minted + units <= cap, "exceeds capacity");
+
+        uint256 fromId = nextId;
+        for (uint256 i = 0; i < units; i++) {
+            uint256 tokenId = nextId++;
+            _safeMint(to, tokenId);
+            barInfo[tokenId] = BarInfo({
+                batchId: leaf.batchId,
+                leafHash: leafHash,
+                reserveId: leaf.reserveId,
+                unitMg: unitMg,
+                serialHash: leaf.serialHash,
+                mineHash: leaf.mineHash,
+                barStandardHash: leaf.barStandardHash,
+                docHash: leaf.docHash
+            });
+        }
+        unitsMinted[key] = minted + units;
+        emit BarsMinted(leaf.batchId, leafHash, leaf.reserveId, units, to, fromId, nextId - 1);
+    }
+
+    // ---- Internals ----
+
+    function _capacityUnits(
+        uint256 batchId,
+        bytes32 leafHash,
+        uint256 quantitySmallest,
+        uint256 fineWeightMg
+    ) internal view returns (uint256) {
+        if (capacityMode == CapacityMode.LEAF_MAX) {
+            return fineWeightMg / unitMg;
+        } else {
+            // STRICT: cap by ERC20 minted from this leaf
+            uint256 consumedSmall = registry.leafConsumed(batchId, leafHash);
+            if (quantitySmallest == 0) return 0;
+            uint256 mgBacked = (consumedSmall * fineWeightMg) / quantitySmallest;
+            return mgBacked / unitMg;
+        }
+    }
+
+    function _key(uint256 batchId, bytes32 leafHash) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(batchId, leafHash));
+    }
+
+    function _hex(bytes32 b32) internal pure returns (string memory) {
+        bytes16 HEX = 0x30313233343536373839616263646566;
+        bytes memory s = new bytes(66);
+        s[0] = "0"; s[1] = "x";
+        for (uint i = 0; i < 32; i++) {
+            uint8 b = uint8(b32[i]);
+            s[2 + i*2] = bytes1(HEX[b >> 4]);
+            s[3 + i*2] = bytes1(HEX[b & 0x0f]);
+        }
+        return string(s);
+    }
+
+    function _u(uint256 v) internal pure returns (string memory) {
+        if (v == 0) return "0";
+        uint256 j = v;
+        uint256 l;
+        while (j != 0) { l++; j /= 10; }
+        bytes memory b = new bytes(l);
+        while (v != 0) {
+            b[--l] = bytes1(uint8(48 + (v % 10)));
+            v /= 10;
+        }
+        return string(b);
+    }
+}
+
+FILE: contracts/polygon/GiftRedemptionEscrowUpgradeable.sol
+----------------------------------------
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC721/IERC721ReceiverUpgradeable.sol";
+
+import "./GIFT.sol";
+import "./MintingUpgradeable.sol";
+import "./GIFTBarNFTDeferred.sol";
+
+/**
+ * @title GiftRedemptionEscrowUpgradeable
+ * @notice
+ *  - Locks GIFT tokens when users buy GIFTBar NFTs representing physical gold.
+ *  - Stores a mapping from (nftContract, tokenId) → locked GIFT amount and metadata.
+ *  - Accepts NFTs into escrow when users redeem via safeTransferFrom.
+ *  - After physical shipment is confirmed, burns the locked GIFT via MintingUpgradeable.burnEscrowBalance(),
+ *    and burns (or permanently locks) the NFT.
+ *
+ *  Requirements:
+ *   - GIFT.supplyController must be the MintingUpgradeable contract.
+ *   - MintingUpgradeable.setEscrow(address(this)) must be called after deployment.
+ *   - For NFT burn, the escrow must be owner of the NFT contract (owner() on GIFTBarNFTDeferred),
+ *     or the NFT contract must allow escrow to call burn(tokenId).
+ */
+contract GiftRedemptionEscrowUpgradeable is
+    Initializable,
+    UUPSUpgradeable,
+    OwnableUpgradeable,
+    IERC721ReceiverUpgradeable
+{
+    struct EscrowRecord {
+        address nftContract;
+        uint256 tokenId;
+        uint256 giftAmount;      // amount of GIFT locked (1 GIFT = 1 mg)
+        address purchaser;       // original buyer who paid GIFT
+        bool initialized;        // true once giftAmount is locked
+        bool inRedemption;       // true while NFT is deposited for redemption
+        address redeemer;        // address that deposited NFT for redemption
+        bool redeemed;           // true once GIFT burned and redemption completed
+        bool cancelled;          // true if redemption was cancelled and NFT returned
+    }
+
+    GIFT public gift;
+    MintingUpgradeable public minting;
+
+    // Allowed marketplace contracts that can lock GIFT when NFTs are bought
+    mapping(address => bool) public isMarketplace;
+
+    // Escrow state keyed by (nftContract → tokenId)
+    mapping(address => mapping(uint256 => EscrowRecord)) public escrows;
+
+    event MarketplaceSet(address indexed marketplace, bool allowed);
+
+    event GiftLockedForNFT(
+        address indexed nftContract,
+        uint256 indexed tokenId,
+        uint256 giftAmount,
+        address indexed purchaser
+    );
+
+    event RedemptionRequested(
+        address indexed nftContract,
+        uint256 indexed tokenId,
+        address indexed redeemer,
+        uint256 giftAmount
+    );
+
+    event RedemptionCancelled(
+        address indexed nftContract,
+        uint256 indexed tokenId,
+        address indexed redeemer
+    );
+
+    event RedemptionCompleted(
+        address indexed nftContract,
+        uint256 indexed tokenId,
+        address indexed redeemer,
+        uint256 giftAmount
+    );
+
+    // ---- Initializer / UUPS ----
+
+    function initialize(address gift_, address minting_) public initializer {
+        require(gift_ != address(0), "Escrow: GIFT is zero");
+        require(minting_ != address(0), "Escrow: minting is zero");
+
+        __Ownable_init(msg.sender);
+        __UUPSUpgradeable_init();
+
+        gift = GIFT(gift_);
+        minting = MintingUpgradeable(minting_);
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    modifier onlyMarketplace() {
+        require(isMarketplace[msg.sender], "Escrow: caller not marketplace");
+        _;
+    }
+
+    // ---- Admin configuration ----
+
+    function setMarketplace(address marketplace, bool allowed) external onlyOwner {
+        require(marketplace != address(0), "Escrow: marketplace is zero");
+        isMarketplace[marketplace] = allowed;
+        emit MarketplaceSet(marketplace, allowed);
+    }
+
+    // ---- Purchase phase: lock GIFT when NFT is bought ----
+
+    /**
+     * @notice Called by the marketplace contract when a user buys an NFT with GIFT.
+     *
+     * @param nftContract The NFT contract address (e.g. GIFTBarNFTDeferred).
+     * @param tokenId     The NFT ID representing the bar/batch.
+     * @param giftAmount  Amount of GIFT paid by the purchaser for this NFT.
+     * @param purchaser   The buyer who paid in GIFT.
+     *
+     * Requirements:
+     *  - msg.sender is a whitelisted marketplace.
+     *  - NFT ID is not already initialized.
+     *  - purchaser has approved the marketplace or this escrow for `giftAmount`.
+     *
+     * Effect:
+     *  - Transfers `giftAmount` GIFT from `purchaser` to this escrow contract.
+     *  - Creates an EscrowRecord tying that amount permanently to (nftContract, tokenId).
+     */
+    function lockGiftForNFT(
+        address nftContract,
+        uint256 tokenId,
+        uint256 giftAmount,
+        address purchaser
+    ) external onlyMarketplace {
+        require(nftContract != address(0), "Escrow: nftContract is zero");
+        require(purchaser != address(0), "Escrow: purchaser is zero");
+        require(giftAmount > 0, "Escrow: giftAmount is zero");
+
+        EscrowRecord storage rec = escrows[nftContract][tokenId];
+        require(!rec.initialized, "Escrow: NFT already initialized");
+
+        bool ok = gift.transferFrom(purchaser, address(this), giftAmount);
+        require(ok, "Escrow: GIFT transferFrom failed");
+
+        rec.nftContract = nftContract;
+        rec.tokenId = tokenId;
+        rec.giftAmount = giftAmount;
+        rec.purchaser = purchaser;
+        rec.initialized = true;
+
+        emit GiftLockedForNFT(nftContract, tokenId, giftAmount, purchaser);
+    }
+
+    // ---- Redemption request: NFT → escrow ----
+
+    /**
+     * @notice Called automatically when a user transfers the NFT to this contract
+     *         using `safeTransferFrom(user, escrow, tokenId, data)`.
+     *
+     * We:
+     *  - Verify an EscrowRecord exists.
+     *  - Mark `inRedemption = true`.
+     *  - Record `redeemer = from`.
+     *  - Emit `RedemptionRequested`.
+     */
+    function onERC721Received(
+        address operator,
+        address from,
+        uint256 tokenId,
+        bytes calldata /* data */
+    ) external override returns (bytes4) {
+        address nftContract = msg.sender;
+
+        EscrowRecord storage rec = escrows[nftContract][tokenId];
+        require(rec.initialized, "Escrow: NFT not bound");
+        require(!rec.redeemed, "Escrow: already redeemed");
+        require(!rec.inRedemption, "Escrow: already in redemption");
+        require(from != address(0), "Escrow: invalid redeemer");
+
+        rec.inRedemption = true;
+        rec.redeemer = from;
+
+        emit RedemptionRequested(nftContract, tokenId, from, rec.giftAmount);
+
+        return IERC721ReceiverUpgradeable.onERC721Received.selector;
+    }
+
+    // ---- Admin: cancel redemption ----
+
+    /**
+     * @notice Cancel an in-progress redemption and send the NFT back to the redeemer.
+     * No GIFT gets burned.
+     */
+    function cancelRedemption(address nftContract, uint256 tokenId) external onlyOwner {
+        EscrowRecord storage rec = escrows[nftContract][tokenId];
+        require(rec.inRedemption, "Escrow: not in redemption");
+        require(!rec.redeemed, "Escrow: already redeemed");
+        require(!rec.cancelled, "Escrow: already cancelled");
+
+        address redeemer = rec.redeemer;
+        require(redeemer != address(0), "Escrow: no redeemer");
+
+        rec.inRedemption = false;
+        rec.cancelled = true;
+
+        // Return NFT to redeemer
+        GIFTBarNFTDeferred(nftContract).safeTransferFrom(address(this), redeemer, tokenId);
+
+        emit RedemptionCancelled(nftContract, tokenId, redeemer);
+    }
+
+    // ---- Admin: complete redemption (burn tokens + burn NFT) ----
+
+    /**
+     * @notice Complete redemption after physical gold is shipped and confirmed.
+     *
+     * Steps:
+     *  1. Ensure this contract holds at least `giftAmount` GIFT for the NFT.
+     *  2. Call `minting.burnEscrowBalance(giftAmount)`:
+     *      - MintingUpgradeable calls `GIFT.redeemGold(escrow, giftAmount)`
+     *      - GIFT burns tokens from this escrow's balance (escrow is `escrow` in MintingUpgradeable).
+     *  3. Attempt to burn the NFT via GIFTBarNFTDeferred.burn(tokenId).
+     *     If burn fails (e.g. NFT contract not configured correctly), NFT remains locked.
+     */
+    function completeRedemption(address nftContract, uint256 tokenId) external onlyOwner {
+        EscrowRecord storage rec = escrows[nftContract][tokenId];
+        require(rec.inRedemption, "Escrow: not in redemption");
+        require(!rec.redeemed, "Escrow: already redeemed");
+        require(!rec.cancelled, "Escrow: redemption cancelled");
+
+        uint256 amount = rec.giftAmount;
+        require(amount > 0, "Escrow: zero amount");
+
+        uint256 balance = gift.balanceOf(address(this));
+        require(balance >= amount, "Escrow: insufficient GIFT");
+
+        // Burn from escrow balance via MintingUpgradeable
+        minting.burnEscrowBalance(amount);
+
+        rec.redeemed = true;
+        rec.inRedemption = false;
+
+        // Try to burn NFT; escrow should be NFT owner for this to work.
+        try GIFTBarNFTDeferred(nftContract).burn(tokenId) {
+            // burned OK
+        } catch {
+            // If this fails, token remains locked in escrow forever
+        }
+
+        emit RedemptionCompleted(nftContract, tokenId, rec.redeemer, amount);
+    }
+
+    // ---- Views ----
+
+    function lockedGiftForNFT(address nftContract, uint256 tokenId) external view returns (uint256) {
+        return escrows[nftContract][tokenId].giftAmount;
+    }
+
+    function totalLockedGift() external view returns (uint256) {
+        return gift.balanceOf(address(this));
+    }
+}
+
+FILE: contracts/polygon/GiftPolygonBridge.sol
+----------------------------------------
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+
+import "./GIFT.sol";
+import "./GIFTTaxManager.sol";
+
+/**
+ * @title GiftPolygonBridge
+ * @notice Pooled bridge contract that:
+ *  - Locks GIFT tokens on Polygon
+ *  - Emits events for off-chain relayer / cross-chain protocol
+ *  - Releases GIFT to users when Solana burns are proven
+ *
+ *  Pattern 1: PoR stays on Polygon, this contract just moves GIFT between
+ *  Polygon users and a shared bridge pool.
+ */
+contract GiftPolygonBridge is Initializable, UUPSUpgradeable, OwnableUpgradeable, PausableUpgradeable {
+    GIFT public gift;
+    GIFTTaxManager public taxManager;
+
+    // Address (off-chain or multi-sig) authorised to confirm Solana burns
+    address public relayer;
+
+    // Simple incremental nonce for uniqueness of deposits
+    uint256 public depositNonce;
+
+    // Track processed Solana burn references to avoid replays
+    mapping(bytes32 => bool) public processedBurns;
+
+    event RelayerUpdated(address indexed newRelayer);
+
+    /// @dev Emitted when someone deposits GIFT on Polygon to be minted on Solana
+    event DepositedToSolana(
+        address indexed polygonSender,
+        bytes32 indexed solanaRecipient,
+        uint256 amount,
+        uint256 nonce
+    );
+
+    /// @dev Emitted when GIFT is released from the bridge pool back to Polygon user
+    ///      based on a verified burn on Solana
+    event WithdrawalToPolygonCompleted(
+        address indexed polygonRecipient,
+        uint256 amount,
+        bytes32 indexed solanaBurnTx
+    );
+
+    modifier onlyRelayer() {
+        require(msg.sender == relayer, "Bridge: caller is not relayer");
+        _;
+    }
+
+    function initialize(
+        address _gift,
+        address _taxManager,
+        address _initialRelayer,
+        address _owner
+    ) external initializer {
+        require(_gift != address(0), "Bridge: GIFT is zero");
+        require(_owner != address(0), "Bridge: owner is zero");
+
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+        __Pausable_init();
+
+        gift = GIFT(_gift);
+        taxManager = GIFTTaxManager(_taxManager);
+        relayer = _initialRelayer;
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function setRelayer(address _relayer) external onlyOwner {
+        require(_relayer != address(0), "Bridge: relayer is zero");
+        relayer = _relayer;
+        emit RelayerUpdated(_relayer);
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    /**
+     * @notice User (or admin) deposits GIFT on Polygon to “move” it to Solana.
+     * @param amount Amount of GIFT to lock.
+     * @param solanaRecipient 32-byte Solana public key of the recipient.
+     *
+     * Requirements:
+     *  - Caller must have approved this contract for `amount` beforehand.
+     */
+    function depositToSolana(uint256 amount, bytes32 solanaRecipient) external whenNotPaused {
+        require(amount > 0, "Bridge: amount is zero");
+        require(solanaRecipient != bytes32(0), "Bridge: invalid Solana recipient");
+
+        // Pull GIFT from sender to bridge (this is where tax exemption matters)
+        bool ok = gift.transferFrom(msg.sender, address(this), amount);
+        require(ok, "Bridge: transferFrom failed");
+
+        uint256 currentNonce = ++depositNonce;
+
+        emit DepositedToSolana(
+            msg.sender,
+            solanaRecipient,
+            amount,
+            currentNonce
+        );
+        // Off-chain relayer watches this event, mints on Solana side accordingly
+    }
+
+    /**
+     * @notice Release locked GIFT from the bridge pool back to a Polygon user,
+     *         based on a verified burn of GIFT on Solana.
+     *
+     * @param polygonRecipient Recipient on Polygon.
+     * @param amount Amount to transfer.
+     * @param solanaBurnTx Unique identifier of the burn transaction on Solana
+     *                     (e.g. hash or VAA hash).
+     *
+     * Requirements:
+     *  - Caller must be the authorised relayer.
+     *  - `solanaBurnTx` must not have been processed before.
+     */
+    function completeWithdrawalFromSolana(
+        address polygonRecipient,
+        uint256 amount,
+        bytes32 solanaBurnTx
+    ) external whenNotPaused onlyRelayer {
+        require(polygonRecipient != address(0), "Bridge: recipient is zero");
+        require(amount > 0, "Bridge: amount is zero");
+        require(!processedBurns[solanaBurnTx], "Bridge: burn already processed");
+
+        processedBurns[solanaBurnTx] = true;
+
+        bool ok = gift.transfer(polygonRecipient, amount);
+        require(ok, "Bridge: transfer failed");
+
+        emit WithdrawalToPolygonCompleted(polygonRecipient, amount, solanaBurnTx);
+    }
+
+    /**
+     * @notice View helper: how many GIFT tokens are locked in the bridge pool.
+     */
+    function lockedBalance() external view returns (uint256) {
+        return gift.balanceOf(address(this));
+    }
+}
+
+FILE: contracts/polygon/Europe/EUTransferAgent.sol
+----------------------------------------
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+
+/// @title EU TransferAgent for GIFT token
+/// @notice Push-only relay with on-chain compliance guards (blacklist, caps, SAR, delays, pause)
+contract TransferAgent is
+    Initializable,
+    AccessControlUpgradeable,
+    PausableUpgradeable,
+    UUPSUpgradeable
+{
+    bytes32 public constant COMPLIANCE_ROLE = keccak256("COMPLIANCE");
+    bytes32 public constant PAUSE_ROLE     = keccak256("PAUSE");
+    bytes32 public constant JUDICIAL_ROLE  = keccak256("JUDICIAL");
+
+    IERC20Upgradeable public gift;
+    address             public regulatorWallet;
+
+    uint256 public dailyCap;
+    uint256 public sarThreshold;
+    uint256 public delayThreshold;
+
+    mapping(address => bool)    public blacklisted;
+    mapping(address => uint256) public spentToday;
+    mapping(address => uint32)  public lastDay;
+
+    struct Deposit { address from; uint128 amount; }
+    mapping(bytes32 => Deposit) public deposits;
+
+    enum State { Pending, Frozen, Executed, Confiscated }
+    struct Ticket {
+        address from;
+        address to;
+        uint128 amount;
+        uint32  created;
+        State   state;
+    }
+    mapping(bytes32 => Ticket) public tickets;
+    mapping(bytes32 => bytes32) public hashToTicket;
+
+    event DepositRecorded(bytes32 indexed txHash, address indexed from, uint128 amount);
+    event TicketRegistered(bytes32 indexed id, address indexed from, address indexed to, uint128 amount);
+    event TransferSuccess(bytes32 indexed id);
+    event TransferPending(bytes32 indexed id);
+    event TransferFrozen(bytes32 indexed id);
+    event TransferConfiscated(bytes32 indexed id);
+    event Suspicious(bytes32 indexed id, uint128 amount);
+    event Blacklisted(address indexed addr, bool flag, bytes32 reasonHash);
+    event Paused(bool paused);
+
+    /// @notice initialize roles, token, regulator and default limits
+    function initialize(address _gift, address _regulator) public initializer {
+        __AccessControl_init();
+        __Pausable_init();
+        __UUPSUpgradeable_init();
+
+        gift             = IERC20Upgradeable(_gift);
+        regulatorWallet  = _regulator;
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(COMPLIANCE_ROLE,    msg.sender);
+        _grantRole(PAUSE_ROLE,         msg.sender);
+        _grantRole(JUDICIAL_ROLE,      msg.sender);
+
+        dailyCap      = 10_000 * 1e18;
+        sarThreshold  = 50_000 * 1e18;
+        delayThreshold= 25_000 * 1e18;
+    }
+
+    /// @notice collapse deposit + ticket registration into one call
+    /// @param txHash         hash of original gift.transfer tx
+    /// @param from           sender address
+    /// @param to             recipient address
+    /// @param amount         amount transferred
+    /// @param suspiciousFlag manual override for SAR freeze
+    function registerTicket(
+        bytes32    txHash,
+        address    from,
+        address    to,
+        uint128    amount,
+        bool       suspiciousFlag
+    )
+        external
+        whenNotPaused
+        onlyRole(COMPLIANCE_ROLE)
+    {
+        require(hashToTicket[txHash] == bytes32(0), "ticket exists");
+
+        deposits[txHash] = Deposit(from, amount);
+        emit DepositRecorded(txHash, from, amount);
+
+        uint32 today = uint32(block.timestamp / 1 days);
+        if (lastDay[from] < today) {
+            lastDay[from]   = today;
+            spentToday[from]= 0;
+        }
+        require(spentToday[from] + amount <= dailyCap, "daily cap exceeded");
+        spentToday[from] += amount;
+
+        bytes32 ticketId = keccak256(abi.encodePacked(txHash, block.timestamp, from, to));
+        hashToTicket[txHash] = ticketId;
+        tickets[ticketId] = Ticket(from, to, amount, today, State.Pending);
+        emit TicketRegistered(ticketId, from, to, amount);
+
+        if (blacklisted[from] || blacklisted[to]) {
+            tickets[ticketId].state = State.Frozen;
+            emit TransferFrozen(ticketId);
+            return;
+        }
+        if (suspiciousFlag || amount >= sarThreshold) {
+            tickets[ticketId].state = State.Frozen;
+            emit Suspicious(ticketId, amount);
+            emit TransferFrozen(ticketId);
+            return;
+        }
+        if (amount >= delayThreshold) {
+            emit TransferPending(ticketId);
+            return;
+        }
+
+        tickets[ticketId].state = State.Executed;
+        gift.transfer(to, amount);
+        emit TransferSuccess(ticketId);
+    }
+
+    function execute(bytes32 ticketId) external onlyRole(COMPLIANCE_ROLE) {
+        Ticket storage t = tickets[ticketId];
+        require(t.state == State.Pending, "not pending");
+        t.state = State.Executed;
+        gift.transfer(t.to, t.amount);
+        emit TransferSuccess(ticketId);
+    }
+
+    function freeze(bytes32 ticketId) external onlyRole(JUDICIAL_ROLE) {
+        Ticket storage t = tickets[ticketId];
+        require(t.state == State.Pending, "not pending");
+        t.state = State.Frozen;
+        emit TransferFrozen(ticketId);
+    }
+
+    function unfreeze(bytes32 ticketId) external onlyRole(JUDICIAL_ROLE) {
+        Ticket storage t = tickets[ticketId];
+        require(t.state == State.Frozen, "not frozen");
+        t.state = State.Pending;
+        emit TransferPending(ticketId);
+    }
+
+    function confiscate(bytes32 ticketId) external onlyRole(JUDICIAL_ROLE) {
+        Ticket storage t = tickets[ticketId];
+        require(
+            t.state == State.Pending || t.state == State.Frozen,
+            "cannot confiscate"
+        );
+        t.state = State.Confiscated;
+        gift.transfer(regulatorWallet, t.amount);
+        emit TransferConfiscated(ticketId);
+    }
+
+    function setBlacklisted(address usr, bool flag, bytes32 reasonHash)
+        external onlyRole(COMPLIANCE_ROLE)
+    {
+        blacklisted[usr] = flag;
+        emit Blacklisted(usr, flag, reasonHash);
+    }
+
+    function pause() external onlyRole(PAUSE_ROLE) {
+        _pause();
+        emit Paused(true);
+    }
+
+    function unpause() external onlyRole(PAUSE_ROLE) {
+        _unpause();
+        emit Paused(false);
+    }
+
+    function updateLimits(
+        uint256 _dailyCap,
+        uint256 _sarThreshold,
+        uint256 _delayThreshold
+    ) external onlyRole(COMPLIANCE_ROLE) {
+        dailyCap       = _dailyCap;
+        sarThreshold   = _sarThreshold;
+        delayThreshold = _delayThreshold;
+    }
+
+    function setRegulator(address _newRegulator) external onlyRole(COMPLIANCE_ROLE) {
+        regulatorWallet = _newRegulator;
+    }
+
+    function _authorizeUpgrade(address) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
+}
+
+SOLANA PROGRAM & CONFIG
+------------------------
+
+FILE: Anchor.toml
+----------------------------------------
+[features]
+seeds = false
+skip-lint = false
+
+[programs.localnet]
+gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+
+[programs.devnet]
+gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
+
+[workspace]
+members = ["programs/gift_bridge_solana"]
+
+
+
+FILE: Cargo.toml
+----------------------------------------
+[workspace]
+members = [
+    "programs/gift_bridge_solana",
+]
+resolver = "2"
+
+[profile.release]
+overflow-checks = true
+
+
+
+FILE: programs/gift_bridge_solana/Cargo.toml
+----------------------------------------
+[package]
+name = "gift_bridge_solana"
+version = "0.1.0"
+description = "Gift bridge program (Solana side) - scaffold"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "gift_bridge_solana"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = "0.30.1"
+anchor-spl = "0.30.1"
+
+
+
+FILE: programs/gift_bridge_solana/Anchor.toml
+----------------------------------------
+[features]
+seeds = false
+skip-lint = false
+
+[programs.localnet]
+gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+
+[programs.devnet]
+gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
+
+[workspace]
+members = ["."]
+
+
+
+FILE: programs/gift_bridge_solana/src/lib.rs
+----------------------------------------
+use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Mint, Token, TokenAccount, MintTo, Burn};
+
+declare_id!("Brdg111111111111111111111111111111111111111"); // MUST match Anchor.toml
+
+#[program]
+pub mod gift_bridge_solana {
+    use super::*;
+
+    /// Initialize bridge config (run once).
+    pub fn initialize_config(
+        ctx: Context<InitializeConfig>,
+        gift_mint: Pubkey,
+        polygon_bridge: [u8; 20],
+    ) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+        cfg.admin = ctx.accounts.admin.key();
+        cfg.gift_mint = gift_mint;
+        cfg.polygon_bridge = polygon_bridge;
+        Ok(())
+    }
+
+    /// Allow the admin to add an additional authorized minter (e.g. backup multisig).
+    pub fn add_minter(ctx: Context<UpdateMinters>, new_minter: Pubkey) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+        require_keys_eq!(cfg.admin, ctx.accounts.admin.key(), BridgeError::UnauthorizedMinter);
+
+        if !cfg.extra_minters.iter().any(|k| *k == new_minter) {
+            cfg.extra_minters.push(new_minter);
+        }
+        Ok(())
+    }
+
+    /// Allow the admin to remove an authorized minter.
+    pub fn remove_minter(ctx: Context<UpdateMinters>, minter: Pubkey) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+        require_keys_eq!(cfg.admin, ctx.accounts.admin.key(), BridgeError::UnauthorizedMinter);
+
+        cfg.extra_minters.retain(|k| *k != minter);
+        Ok(())
+    }
+
+    /// Mint GIFT_SOL on Solana corresponding to a deposit on Polygon.
+    /// Called by your off-chain relayer (admin or any authorized minter signer).
+    pub fn mint_from_polygon(
+        ctx: Context<MintFromPolygon>,
+        amount: u64,
+        deposit_id: [u8; 32],
+    ) -> Result<()> {
+        require!(amount > 0, BridgeError::ZeroAmount);
+
+        // Only admin or explicitly authorized minters may mint from Polygon deposits.
+        let cfg = &ctx.accounts.config;
+        let caller = ctx.accounts.admin.key();
+        let is_admin = cfg.admin == caller;
+        let is_extra = cfg.extra_minters.iter().any(|k| *k == caller);
+        require!(is_admin || is_extra, BridgeError::UnauthorizedMinter);
+
+        // Prevent replay
+        let processed = &mut ctx.accounts.processed_deposit;
+        require!(!processed.used, BridgeError::DepositAlreadyProcessed);
+        processed.used = true;
+        processed.deposit_id = deposit_id;
+
+        // Mint tokens to recipient using mint authority PDA
+        let cfg_key = cfg.key();
+
+        let bump = ctx.bumps.mint_authority;
+        let seeds: &[&[u8]] = &[
+            b"mint_authority",
+            cfg_key.as_ref(),
+            &[bump],
+        ];
+        let signer_seeds = &[&seeds[..]];
+
+        let cpi_accounts = MintTo {
+            mint: ctx.accounts.gift_mint.to_account_info(),
+            to: ctx.accounts.recipient_token_account.to_account_info(),
+            authority: ctx.accounts.mint_authority.to_account_info(),
+        };
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            cpi_accounts,
+            signer_seeds,
+        );
+
+        token::mint_to(cpi_ctx, amount)?;
+
+        Ok(())
+    }
+
+    /// Burn GIFT_SOL on Solana to request withdrawal on Polygon.
+    /// Anyone can call this for themselves.
+    pub fn burn_for_polygon(
+        ctx: Context<BurnForPolygon>,
+        amount: u64,
+        polygon_recipient: [u8; 20],
+    ) -> Result<()> {
+        require!(amount > 0, BridgeError::ZeroAmount);
+
+        // Burn from user’s token account
+        let cpi_accounts = Burn {
+            mint: ctx.accounts.gift_mint.to_account_info(),
+            from: ctx.accounts.user_token_account.to_account_info(),
+            authority: ctx.accounts.user.to_account_info(),
+        };
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            cpi_accounts,
+        );
+        token::burn(cpi_ctx, amount)?;
+
+        // Emit event for off-chain relayer
+        emit!(BurnForPolygonEvent {
+            user: ctx.accounts.user.key(),
+            amount,
+            polygon_recipient,
+        });
+
+        Ok(())
+    }
+}
+
+#[account]
+pub struct Config {
+    pub admin: Pubkey,
+    pub gift_mint: Pubkey,
+    pub polygon_bridge: [u8; 20],
+    /// Additional authorized minters (backup multisigs, etc.)
+    pub extra_minters: Vec<Pubkey>,
+}
+
+#[account]
+pub struct ProcessedDeposit {
+    pub used: bool,
+    pub deposit_id: [u8; 32],
+}
+
+#[derive(Accounts)]
+pub struct InitializeConfig<'info> {
+    #[account(
+        init,
+        payer = admin,
+        seeds = [b"config"],
+        bump,
+        // Discriminator + admin + gift_mint + polygon_bridge + extra_minters Vec<Pubkey> (up to 16)
+        space = 8  // discriminator
+              + 32 // admin
+              + 32 // gift_mint
+              + 20 // polygon_bridge
+              + 4  // Vec length prefix
+              + 16 * 32 // up to 16 extra minters
+    )]
+    pub config: Account<'info, Config>,
+
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(amount: u64, deposit_id: [u8; 32])]
+pub struct MintFromPolygon<'info> {
+    #[account(mut)]
+    pub config: Account<'info, Config>,
+
+    #[account(
+        mut,
+        constraint = gift_mint.key() == config.gift_mint
+    )]
+    pub gift_mint: Account<'info, Mint>,
+
+    /// CHECK: PDA acting as mint authority
+    #[account(
+        seeds = [b"mint_authority", config.key().as_ref()],
+        bump
+    )]
+    pub mint_authority: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        constraint = recipient_token_account.mint == gift_mint.key()
+    )]
+    pub recipient_token_account: Account<'info, TokenAccount>,
+
+        #[account(
+        init,
+        payer = admin,
+        seeds = [b"processed_deposit", deposit_id.as_ref()],
+        bump,
+        space = 8 + 1 + 32
+    )]
+    pub processed_deposit: Account<'info, ProcessedDeposit>,
+
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct BurnForPolygon<'info> {
+    #[account(
+        has_one = gift_mint
+    )]
+    pub config: Account<'info, Config>,
+
+    #[account(
+        mut,
+        constraint = gift_mint.key() == config.gift_mint
+    )]
+    pub gift_mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        constraint = user_token_account.mint == gift_mint.key(),
+        constraint = user_token_account.owner == user.key(),
+    )]
+    pub user_token_account: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateMinters<'info> {
+    #[account(mut)]
+    pub config: Account<'info, Config>,
+
+    #[account(mut)]
+    pub admin: Signer<'info>,
+}
+
+#[event]
+pub struct BurnForPolygonEvent {
+    pub user: Pubkey,
+    pub amount: u64,
+    pub polygon_recipient: [u8; 20],
+}
+
+#[error_code]
+pub enum BridgeError {
+    #[msg("Amount is zero")]
+    ZeroAmount,
+    #[msg("Deposit already processed")]
+    DepositAlreadyProcessed,
+    #[msg("Caller is not an authorized minter")]
+    UnauthorizedMinter,
+}
+
+FILE: idl/gift_bridge_solana.json
+----------------------------------------
+{
+  "version": "0.1.0",
+  "name": "gift_bridge_solana",
+  "instructions": [
+    {
+      "name": "initializeConfig",
+      "accounts": [
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "giftMint",
+          "type": "publicKey"
+        },
+        {
+          "name": "polygonBridge",
+          "type": {
+            "array": [
+              "u8",
+              20
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "addMinter",
+      "accounts": [
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        }
+      ],
+      "args": [
+        {
+          "name": "newMinter",
+          "type": "publicKey"
+        }
+      ]
+    },
+    {
+      "name": "removeMinter",
+      "accounts": [
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        }
+      ],
+      "args": [
+        {
+          "name": "minter",
+          "type": "publicKey"
+        }
+      ]
+    },
+    {
+      "name": "mintFromPolygon",
+      "accounts": [
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "giftMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mintAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "recipientTokenAccount",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "processedDeposit",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "depositId",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "burnForPolygon",
+      "accounts": [
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "giftMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "userTokenAccount",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "user",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "polygonRecipient",
+          "type": {
+            "array": [
+              "u8",
+              20
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "publicKey"
+          },
+          {
+            "name": "giftMint",
+            "type": "publicKey"
+          },
+          {
+            "name": "polygonBridge",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
+          },
+          {
+            "name": "extraMinters",
+            "type": {
+              "vec": "publicKey"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "processedDeposit",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "used",
+            "type": "bool"
+          },
+          {
+            "name": "depositId",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "events": [
+    {
+      "name": "burnForPolygonEvent",
+      "fields": [
+        {
+          "name": "user",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "amount",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "polygonRecipient",
+          "type": {
+            "array": [
+              "u8",
+              20
+            ]
+          },
+          "index": false
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "ZeroAmount",
+      "msg": "Amount is zero"
+    },
+    {
+      "code": 6001,
+      "name": "DepositAlreadyProcessed",
+      "msg": "Deposit already processed"
+    },
+    {
+      "code": 6002,
+      "name": "UnauthorizedMinter",
+      "msg": "Caller is not an authorized minter"
+    }
+  ]
+}
+
+
+
+SOLANA TS CLIENTS / SCRIPTS
+----------------------------
+
+FILE: scripts/solana/deployBridgeProgram.ts
+----------------------------------------
+import * as anchor from "@coral-xyz/anchor";
+import { PublicKey } from "@solana/web3.js";
+import * as fs from "fs";
+import idl from "../../idl/gift_bridge_solana.json";
+
+const PROGRAM_ID = new PublicKey(
+  "Brdg111111111111111111111111111111111111111" // same as in lib.rs / Anchor.toml
+);
+
+async function main() {
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
+
+  const walletPubkey = provider.wallet.publicKey;
+  console.log("Wallet:", walletPubkey.toBase58());
+
+  const program = new anchor.Program(idl as anchor.Idl, PROGRAM_ID, provider);
+
+  // Use the mint you created with createGiftSolMint.ts
+  const giftMintStr = process.env.GIFT_SOL_MINT!;
+  if (!giftMintStr) {
+    throw new Error("Set GIFT_SOL_MINT env var to your mint address");
+  }
+  const giftMint = new PublicKey(giftMintStr);
+
+  // Derive config PDA
+  const [configPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("config")],
+    PROGRAM_ID
+  );
+
+  // Example Polygon bridge address (20 bytes). Replace with actual.
+  const polygonBridgeAddress = "0x0000000000000000000000000000000000000000".replace(
+    "0x",
+    ""
+  );
+  const polygonBridgeBytes = Buffer.from(polygonBridgeAddress, "hex");
+  if (polygonBridgeBytes.length !== 20) throw new Error("Bad bridge address");
+
+  const tx = await program.methods
+    .initializeConfig(giftMint, Array.from(polygonBridgeBytes) as any)
+    .accounts({
+      config: configPda,
+      admin: walletPubkey,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    })
+    .rpc();
+
+  console.log("initialize_config tx:", tx);
+  console.log("Config PDA:", configPda.toBase58());
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+
+FILE: scripts/solana/createGiftSolMint.ts
+----------------------------------------
+import {
+  Connection,
+  Keypair,
+  clusterApiUrl,
+} from "@solana/web3.js";
+import {
+  createMint,
+  getOrCreateAssociatedTokenAccount,
+  mintTo,
+} from "@solana/spl-token";
+import * as fs from "fs";
+
+async function main() {
+  const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
+
+  // Use your default Solana keypair (~/.config/solana/id.json)
+  const secret = JSON.parse(
+    fs.readFileSync(process.env.HOME + "/.config/solana/id.json", "utf-8")
+  );
+  const payer = Keypair.fromSecretKey(new Uint8Array(secret));
+
+  console.log("Payer:", payer.publicKey.toBase58());
+
+  // Create mint with 18 decimals
+  const decimals = 18;
+  const mint = await createMint(
+    connection,
+    payer,
+    payer.publicKey, // mint authority
+    payer.publicKey, // freeze authority
+    decimals
+  );
+
+  console.log("GIFT_SOL mint address:", mint.toBase58());
+
+  // Optionally create your own associated token account and mint a small amount for testing
+  const ata = await getOrCreateAssociatedTokenAccount(
+    connection,
+    payer,
+    mint,
+    payer.publicKey
+  );
+
+  await mintTo(
+    connection,
+    payer,
+    mint,
+    ata.address,
+    payer.publicKey,
+    1n * BigInt(10 ** decimals) // 1 token
+  );
+
+  console.log("Minted 1 GIFT_SOL to:", ata.address.toBase58());
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+
+FILE: scripts/solana/bridgeClient.ts
+----------------------------------------
+import * as anchor from "@coral-xyz/anchor";
+import { PublicKey, Keypair } from "@solana/web3.js";
+import { getOrCreateAssociatedTokenAccount } from "@solana/spl-token";
+import idl from "../../idl/gift_bridge_solana.json";
+
+const PROGRAM_ID = new PublicKey(
+  "Brdg111111111111111111111111111111111111111"
+);
+
+async function main() {
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
+  const wallet = provider.wallet as anchor.Wallet;
+
+  const program = new anchor.Program(idl as anchor.Idl, PROGRAM_ID, provider);
+
+  const giftMint = new PublicKey(process.env.GIFT_SOL_MINT!);
+  const configPubkey = new PublicKey(process.env.GIFT_BRIDGE_CONFIG!);
+
+  console.log("Wallet:", wallet.publicKey.toBase58());
+  console.log("GIFT_SOL mint:", giftMint.toBase58());
+  console.log("Config:", configPubkey.toBase58());
+
+  // Derive mint authority PDA
+  const [mintAuthorityPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("mint_authority"), configPubkey.toBuffer()],
+    PROGRAM_ID
+  );
+
+  // Get or create recipient token account (for testing, it's the same wallet)
+  const ata = await getOrCreateAssociatedTokenAccount(
+    provider.connection,
+    wallet.payer,
+    giftMint,
+    wallet.publicKey
+  );
+
+  console.log("Recipient ATA:", ata.address.toBase58());
+
+  // Simulate a deposit id (in production this must match Polygon side)
+  const depositId = anchor.utils.bytes.utf8.encode("test-deposit-1");
+  const depositIdPadded = new Uint8Array(32);
+  depositIdPadded.set(depositId.slice(0, 32));
+
+  // Derive processed_deposit PDA
+  const [processedDepositPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("processed_deposit"), Buffer.from(depositIdPadded)],
+    PROGRAM_ID
+  );
+
+  // Mint 100 GIFT_SOL (assuming 18 decimals you can scale as you like)
+  const amount = new anchor.BN(100_000_000_000_000_000n); // 0.1 * 1e18, adjust as needed
+
+  const tx = await program.methods
+    .mintFromPolygon(amount, Array.from(depositIdPadded) as any)
+    .accounts({
+      config: configPubkey,
+      giftMint,
+      mintAuthority: mintAuthorityPda,
+      recipientTokenAccount: ata.address,
+      processedDeposit: processedDepositPda,
+      admin: wallet.publicKey,
+      tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    })
+    .rpc();
+
+  console.log("mint_from_polygon tx:", tx);
+
+  // Now burn some to test burn_for_polygon
+  const polygonRecipientHex =
+    "0000000000000000000000000000000000000000"; // change to real address bytes
+  const polygonRecipientBytes = Buffer.from(polygonRecipientHex, "hex");
+
+  const burnAmount = new anchor.BN(50_000_000_000_000_000n); // 0.05 * 1e18
+
+  const burnTx = await program.methods
+    .burnForPolygon(burnAmount, Array.from(polygonRecipientBytes) as any)
+    .accounts({
+      config: configPubkey,
+      giftMint,
+      userTokenAccount: ata.address,
+      user: wallet.publicKey,
+      tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+
+  console.log("burn_for_polygon tx:", burnTx);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

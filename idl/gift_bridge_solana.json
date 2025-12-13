@@ -1,0 +1,288 @@
+{
+  "version": "0.1.0",
+  "name": "gift_bridge_solana",
+  "instructions": [
+    {
+      "name": "initializeConfig",
+      "accounts": [
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "giftMint",
+          "type": "publicKey"
+        },
+        {
+          "name": "polygonBridge",
+          "type": {
+            "array": [
+              "u8",
+              20
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "addMinter",
+      "accounts": [
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        }
+      ],
+      "args": [
+        {
+          "name": "newMinter",
+          "type": "publicKey"
+        }
+      ]
+    },
+    {
+      "name": "removeMinter",
+      "accounts": [
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        }
+      ],
+      "args": [
+        {
+          "name": "minter",
+          "type": "publicKey"
+        }
+      ]
+    },
+    {
+      "name": "mintFromPolygon",
+      "accounts": [
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "giftMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mintAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "recipientTokenAccount",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "processedDeposit",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "depositId",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "burnForPolygon",
+      "accounts": [
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "giftMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "userTokenAccount",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "user",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "polygonRecipient",
+          "type": {
+            "array": [
+              "u8",
+              20
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "publicKey"
+          },
+          {
+            "name": "giftMint",
+            "type": "publicKey"
+          },
+          {
+            "name": "polygonBridge",
+            "type": {
+              "array": [
+                "u8",
+                20
+              ]
+            }
+          },
+          {
+            "name": "extraMinters",
+            "type": {
+              "vec": "publicKey"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "processedDeposit",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "used",
+            "type": "bool"
+          },
+          {
+            "name": "depositId",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "events": [
+    {
+      "name": "burnForPolygonEvent",
+      "fields": [
+        {
+          "name": "user",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "amount",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "polygonRecipient",
+          "type": {
+            "array": [
+              "u8",
+              20
+            ]
+          },
+          "index": false
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "ZeroAmount",
+      "msg": "Amount is zero"
+    },
+    {
+      "code": 6001,
+      "name": "DepositAlreadyProcessed",
+      "msg": "Deposit already processed"
+    },
+    {
+      "code": 6002,
+      "name": "UnauthorizedMinter",
+      "msg": "Caller is not an authorized minter"
+    }
+  ]
+}
+
+

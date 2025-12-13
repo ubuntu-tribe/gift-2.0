@@ -1,0 +1,21 @@
+# Foundry
+contracts/polygon/out/
+contracts/polygon/cache/
+
+# Rust / Anchor
+target/
+**/target/
+.anchor/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / Editor
+.DS_Store
+.vscode/
+
+
