@@ -91,12 +91,29 @@ contract GiftRedemptionEscrowUpgradeableTest is TestHelpers {
         vm.prank(marketplace);
         escrow.lockGiftForNFT(address(nft), tokenId, price, user1);
 
-        ( , , uint256 giftAmount, address purchaser, bool initialized, , , , ) =
-            escrow.escrows(address(nft), tokenId);
+        (
+            address nftContract_,
+            uint256 tokenId_,
+            uint256 giftAmount,
+            address purchaser,
+            bool initialized,
+            bool inRedemption,
+            address redeemer,
+            bool redeemed,
+            bool cancelled,
+            bool confiscated
+        ) = escrow.escrows(address(nft), tokenId);
 
         assertEq(giftAmount, price);
+        assertEq(nftContract_, address(nft));
+        assertEq(tokenId_, tokenId);
         assertEq(purchaser, user1);
         assertTrue(initialized);
+        assertFalse(inRedemption);
+        assertEq(redeemer, address(0));
+        assertFalse(redeemed);
+        assertFalse(cancelled);
+        assertFalse(confiscated);
         assertEq(gift.balanceOf(address(escrow)), price);
     }
 
@@ -143,14 +160,25 @@ contract GiftRedemptionEscrowUpgradeableTest is TestHelpers {
         vm.prank(user1);
         nft.safeTransferFrom(user1, address(escrow), tokenId);
 
-        ( , , , , bool initialized, bool inRedemption, address redeemer, bool redeemed, bool cancelled ) =
-            escrow.escrows(address(nft), tokenId);
+        (
+            ,
+            ,
+            ,
+            ,
+            bool initialized,
+            bool inRedemption,
+            address redeemer,
+            bool redeemed,
+            bool cancelled,
+            bool confiscated
+        ) = escrow.escrows(address(nft), tokenId);
 
         assertTrue(initialized);
         assertTrue(inRedemption);
         assertEq(redeemer, user1);
         assertFalse(redeemed);
         assertFalse(cancelled);
+        assertFalse(confiscated);
     }
 
     // ============ Cancel redemption ============
@@ -163,18 +191,29 @@ contract GiftRedemptionEscrowUpgradeableTest is TestHelpers {
         nft.safeTransferFrom(user1, address(escrow), tokenId);
 
         vm.expectEmit(true, true, true, true);
-        emit GiftRedemptionEscrowUpgradeable.RedemptionCancelled(address(nft), tokenId, user1);
+        emit GiftRedemptionEscrowUpgradeable.RedemptionCancelledAndRefunded(address(nft), tokenId, user1, price);
 
         vm.prank(owner);
-        escrow.cancelRedemption(address(nft), tokenId);
+        escrow.adminRefundRedemption(address(nft), tokenId);
 
-        ( , , , , , bool inRedemption, address redeemer, bool redeemed, bool cancelled ) =
-            escrow.escrows(address(nft), tokenId);
+        (
+            ,
+            ,
+            ,
+            ,
+            ,
+            bool inRedemption,
+            address redeemer,
+            bool redeemed,
+            bool cancelled,
+            bool confiscated
+        ) = escrow.escrows(address(nft), tokenId);
 
         assertFalse(inRedemption);
         assertTrue(cancelled);
         assertFalse(redeemed);
         assertEq(redeemer, user1);
+        assertFalse(confiscated);
         assertEq(nft.ownerOf(tokenId), user1);
     }
 
@@ -187,7 +226,7 @@ contract GiftRedemptionEscrowUpgradeableTest is TestHelpers {
 
         vm.prank(user1);
         vm.expectRevert();
-        escrow.cancelRedemption(address(nft), tokenId);
+        escrow.adminRefundRedemption(address(nft), tokenId);
     }
 
     // ============ Complete redemption (full end-to-end flow) ============
@@ -217,13 +256,24 @@ contract GiftRedemptionEscrowUpgradeableTest is TestHelpers {
         vm.expectRevert();
         nft.ownerOf(tokenId);
 
-        ( , , uint256 giftAmount, , bool initialized, bool inRedemption, , bool redeemed, bool cancelled ) =
-            escrow.escrows(address(nft), tokenId);
+        (
+            ,
+            ,
+            uint256 giftAmount,
+            ,
+            bool initialized,
+            bool inRedemption,
+            ,
+            bool redeemed,
+            bool cancelled,
+            bool confiscated
+        ) = escrow.escrows(address(nft), tokenId);
 
         assertTrue(initialized);
         assertFalse(inRedemption);
         assertTrue(redeemed);
         assertFalse(cancelled);
+        assertFalse(confiscated);
         assertEq(giftAmount, price);
     }
 }
