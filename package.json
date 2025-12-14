@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test:solana": "mocha -r ts-node/register tests/solana/**/*.test.ts"
+    "test:solana": "mocha -r ts-node/register tests/solana/**/*.test.ts",
+    "build:polygon": "cd contracts/polygon && forge build",
+    "verify:polygon:new": "bash script/verify/verify-new-core.sh"
   },
   "dependencies": {
     "@coral-xyz/anchor": "0.30.1",

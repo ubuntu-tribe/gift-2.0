@@ -1,0 +1,22 @@
+{
+  "polygon": {
+    "GIFT": "0xCfde7c43EDB3c9f71331AAc1003b099CE40c94ea",
+    "GIFTPoR": "0xf929a9ba4a18e673603774c4f4607ea7ea770302",
+    "GIFTTaxManager": "0x88603955a6b0735f90765e88d93089fe268177d2",
+    "GIFTBatchRegistry": "0x39926D18F9746f5D9a9c5D624cE1217911759ac2",
+    "MintingUpgradeable": {
+      "proxy": "0xb158B908EdB2105AF9296894b03f8F4aC8e29a6A",
+      "implementation": "0xd4fbf0a5d1a08e9c86e75a99af8ca0e62c5271ca"
+    },
+    "GiftRedemptionEscrowUpgradeable": {
+      "proxy": "0x5f8C056C51e8c0642213a75D404eEeE422e86f83",
+      "implementation": "0xa574d943683e1cb02d76cad73bb9560286c450bf"
+    },
+    "GIFTBarNFTDeferred": "0x830d2dd5b907A7371E56dA330f10A0a9bCf2ca51",
+    "GiftPolygonBridge": {
+      "proxy": "0xab2a279dDcab7404b173Af555327219D81e8401d",
+      "implementation": "0x7e38cce2d443ac7e07c1a812a3874abf6c44aa9f"
+    }
+  },
+  "solana": {}
+}
