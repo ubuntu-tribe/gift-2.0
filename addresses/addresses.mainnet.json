@@ -18,5 +18,8 @@
       "implementation": "0x7e38cce2d443ac7e07c1a812a3874abf6c44aa9f"
     }
   },
-  "solana": {}
+  "solana": {
+    "giftBridgeProgram": "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf",
+    "giftMint": "Fsg5kzL5kJwf9e7ZTq1arzZWGQ4YiRkibXm9vWRY789E"
+  }
 }

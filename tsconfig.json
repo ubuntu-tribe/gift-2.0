@@ -7,7 +7,8 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "types": ["mocha", "node"]
+    "types": ["mocha", "node"],
+    "typeRoots": ["./node_modules/@types", "./scripts/solana"]
   },
   "include": ["scripts/**/*.ts", "tests/**/*.ts", "idl/**/*.json"]
 }

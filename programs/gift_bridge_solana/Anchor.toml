@@ -3,10 +3,10 @@ seeds = false
 skip-lint = false
 
 [programs.localnet]
-gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+gift_bridge_solana = "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf"
 
 [programs.devnet]
-gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+gift_bridge_solana = "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf"
 
 [registry]
 url = "https://api.apr.dev"

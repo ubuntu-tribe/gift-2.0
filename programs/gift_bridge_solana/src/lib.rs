@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, MintTo, Burn};
 
-declare_id!("Brdg111111111111111111111111111111111111111"); // MUST match Anchor.toml
+declare_id!("EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf"); // MUST match Anchor.toml
 
 #[program]
 pub mod gift_bridge_solana {

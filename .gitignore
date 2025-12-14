@@ -18,5 +18,7 @@ pnpm-debug.log*
 .DS_Store
 .vscode/
 .env
+services/relayer/state.json
+accounts/
 
 

@@ -5,19 +5,25 @@
   "scripts": {
     "test:solana": "mocha -r ts-node/register tests/solana/**/*.test.ts",
     "build:polygon": "cd contracts/polygon && forge build",
-    "verify:polygon:new": "bash script/verify/verify-new-core.sh"
+    "verify:polygon:new": "bash script/verify/verify-new-core.sh",
+    "deploy:solana:program": "ts-node scripts/solana/deployProgram.ts",
+    "deploy:solana:mint": "ts-node scripts/solana/createGiftSolMint.ts",
+    "deploy:solana:config": "ts-node scripts/solana/deployBridgeProgram.ts",
+    "deploy:solana:mintAuthority": "ts-node scripts/solana/setMintAuthority.ts",
+    "deploy:solana:setMetadata": "ts-node scripts/solana/setMetadata.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "0.30.1",
+    "@metaplex-foundation/mpl-token-metadata": "^3.4.0",
+    "@solana/spl-token": "^0.4.8",
     "@solana/web3.js": "^1.93.0",
-    "@solana/spl-token": "^0.4.8"
+    "dotenv": "^17.2.3"
   },
   "devDependencies": {
-    "typescript": "^5.3.3",
-    "ts-node": "^10.9.1",
+    "@types/bs58": "^5.0.0",
+    "chai": "^4.3.10",
     "mocha": "^10.2.0",
-    "chai": "^4.3.10"
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.3"
   }
 }
-
-

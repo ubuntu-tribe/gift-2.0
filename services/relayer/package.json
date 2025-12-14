@@ -1,0 +1,24 @@
+{
+  "name": "gift-relayer",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "process:deposits": "node dist/index.js process-deposits",
+    "process:burns": "node dist/index.js process-burns"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.30.1",
+    "@solana/spl-token": "^0.4.8",
+    "@solana/web3.js": "^1.93.0",
+    "bs58": "^5.0.0",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}
+
+
