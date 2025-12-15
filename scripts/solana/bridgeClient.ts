@@ -4,6 +4,10 @@ import { getOrCreateAssociatedTokenAccount } from "@solana/spl-token";
 import * as fs from "fs";
 import * as path from "path";
 import idl from "../../idl/gift_bridge_solana.json";
+import {
+  burnForPolygonUI,
+  mintFromPolygonUI,
+} from "../../solana/lib/bridgeClient";
 
 const ROOT = path.resolve(__dirname, "../..");
 const ADDRESSES_PATH = path.join(ROOT, "addresses", "addresses.mainnet.json");
@@ -29,15 +33,6 @@ export async function testMintFromPolygon() {
     provider
   );
 
-  console.log("Wallet:", wallet.publicKey.toBase58());
-  console.log("GIFT_SOL mint:", giftMint.toBase58());
-  console.log("Config:", configPubkey.toBase58());
-
-  const [mintAuthorityPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("mint_authority"), configPubkey.toBuffer()],
-    programId
-  );
-
   const ata = await getOrCreateAssociatedTokenAccount(
     provider.connection,
     wallet.payer,
@@ -51,28 +46,23 @@ export async function testMintFromPolygon() {
   const depositIdPadded = new Uint8Array(32);
   depositIdPadded.set(depositId.slice(0, 32));
 
-  const [processedDepositPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("processed_deposit"), Buffer.from(depositIdPadded)],
-    programId
-  );
-
   const amount = new anchor.BN(100_000_000_000_000_000n);
 
-  const tx = await program.methods
-    .mintFromPolygon(amount, Array.from(depositIdPadded) as any)
-    .accounts({
-      config: configPubkey,
-      giftMint,
-      mintAuthority: mintAuthorityPda,
-      recipientTokenAccount: ata.address,
-      processedDeposit: processedDepositPda,
-      admin: wallet.publicKey,
-      tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-      systemProgram: anchor.web3.SystemProgram.programId,
-    })
-    .rpc();
+  console.log("Wallet:", wallet.publicKey.toBase58());
+  console.log("GIFT_SOL mint:", giftMint.toBase58());
+  console.log("Config:", configPubkey.toBase58());
+  console.log("Recipient ATA:", ata.address.toBase58());
 
-  console.log("mint_from_polygon tx:", tx);
+  const txSig = await mintFromPolygonUI(
+    program,
+    configPubkey,
+    giftMint,
+    wallet.publicKey,
+    amount.toBigInt(),
+    depositIdPadded
+  );
+
+  console.log("mint_from_polygon tx:", txSig);
 }
 
 export async function testBurnForPolygon(polygonRecipientHex: string) {
@@ -111,18 +101,16 @@ export async function testBurnForPolygon(polygonRecipientHex: string) {
 
   const burnAmount = new anchor.BN(50_000_000_000_000_000n);
 
-  const burnTx = await program.methods
-    .burnForPolygon(burnAmount, Array.from(polygonRecipientBytes) as any)
-    .accounts({
-      config: configPubkey,
-      giftMint,
-      userTokenAccount: ata.address,
-      user: wallet.publicKey,
-      tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-    })
-    .rpc();
+  const burnTxSig = await burnForPolygonUI(
+    program,
+    configPubkey,
+    giftMint,
+    wallet.publicKey,
+    burnAmount.toBigInt(),
+    polygonRecipientBytes
+  );
 
-  console.log("burn_for_polygon tx:", burnTx);
+  console.log("burn_for_polygon tx:", burnTxSig);
 }
 
 if (require.main === module) {

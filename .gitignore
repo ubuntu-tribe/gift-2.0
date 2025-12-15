@@ -17,8 +17,17 @@ pnpm-debug.log*
 # OS / Editor
 .DS_Store
 .vscode/
+
+# Env files (root + nested apps)
 .env
+.env.*
+**/.env
+**/.env.*
+
 services/relayer/state.json
 accounts/
+
+# Local documentation notes that shouldn't be pushed
+SOLANA_OPS_CONSOLE.md
 
 

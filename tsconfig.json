@@ -10,7 +10,7 @@
     "types": ["mocha", "node"],
     "typeRoots": ["./node_modules/@types", "./scripts/solana"]
   },
-  "include": ["scripts/**/*.ts", "tests/**/*.ts", "idl/**/*.json"]
+  "include": ["scripts/**/*.ts", "tests/**/*.ts", "idl/**/*.json", "solana/**/*.ts"]
 }
 
 

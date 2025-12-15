@@ -10,7 +10,8 @@
     "deploy:solana:mint": "ts-node scripts/solana/createGiftSolMint.ts",
     "deploy:solana:config": "ts-node scripts/solana/deployBridgeProgram.ts",
     "deploy:solana:mintAuthority": "ts-node scripts/solana/setMintAuthority.ts",
-    "deploy:solana:setMetadata": "ts-node scripts/solana/setMetadata.ts"
+    "deploy:solana:setMetadata": "ts-node scripts/solana/setMetadata.ts",
+    "dev:solana:ops": "cd apps/solana-ops-console && npm run dev"
   },
   "dependencies": {
     "@coral-xyz/anchor": "0.30.1",
