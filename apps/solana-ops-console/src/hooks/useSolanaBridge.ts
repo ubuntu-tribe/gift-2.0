@@ -25,12 +25,20 @@ export function useSolanaBridge() {
   }, [connection, anchorWallet]);
 
   const program = useMemo(() => {
-    if (!provider || !config) return null;
-    return new anchor.Program(
-      idl as anchor.Idl,
-      new PublicKey(config.programId),
-      provider
-    );
+    if (!provider || !config?.programId) return null;
+    try {
+      return new anchor.Program(
+        idl as anchor.Idl,
+        new PublicKey(config.programId),
+        provider
+      );
+    } catch (e) {
+      console.error("Failed to create Solana program from config", {
+        error: e,
+        config,
+      });
+      return null;
+    }
   }, [provider, config]);
 
   const giftMint = useMemo(() => {

@@ -219,7 +219,7 @@ Before running:
 - Ensure a Solana cluster + wallet are configured:
   - `ANCHOR_PROVIDER_URL` – RPC URL (e.g. local `solana-test-validator` or devnet).
   - `ANCHOR_WALLET` – path to a funded keypair JSON file.
-- Deploy the `gift_bridge_solana` program (ID must match `Brdg111111111111111111111111111111111111111`).
+- Deploy the `gift_bridge_solana` program (ID must match `EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf`).
 - Initialize the Solana side using the helper scripts:
   - `scripts/solana/createGiftSolMint.ts` – creates the GIFT_SOL SPL mint.
   - `scripts/solana/deployBridgeProgram.ts` – creates the Config PDA and wires admin/mint/Polygon bridge.

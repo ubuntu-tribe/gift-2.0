@@ -2136,10 +2136,10 @@ seeds = false
 skip-lint = false
 
 [programs.localnet]
-gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+gift_bridge_solana = "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf"
 
 [programs.devnet]
-gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+gift_bridge_solana = "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf"
 
 [registry]
 url = "https://api.apr.dev"
@@ -2199,10 +2199,10 @@ seeds = false
 skip-lint = false
 
 [programs.localnet]
-gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+gift_bridge_solana = "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf"
 
 [programs.devnet]
-gift_bridge_solana = "Brdg111111111111111111111111111111111111111"
+gift_bridge_solana = "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf"
 
 [registry]
 url = "https://api.apr.dev"
@@ -2221,7 +2221,7 @@ FILE: programs/gift_bridge_solana/src/lib.rs
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, MintTo, Burn};
 
-declare_id!("Brdg111111111111111111111111111111111111111"); // MUST match Anchor.toml
+declare_id!("EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf"); // MUST match Anchor.toml
 
 #[program]
 pub mod gift_bridge_solana {
@@ -2774,7 +2774,7 @@ import * as fs from "fs";
 import idl from "../../idl/gift_bridge_solana.json";
 
 const PROGRAM_ID = new PublicKey(
-  "Brdg111111111111111111111111111111111111111" // same as in lib.rs / Anchor.toml
+  "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf" // same as in lib.rs / Anchor.toml
 );
 
 async function main() {
@@ -2895,7 +2895,7 @@ import { getOrCreateAssociatedTokenAccount } from "@solana/spl-token";
 import idl from "../../idl/gift_bridge_solana.json";
 
 const PROGRAM_ID = new PublicKey(
-  "Brdg111111111111111111111111111111111111111"
+  "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf"
 );
 
 async function main() {

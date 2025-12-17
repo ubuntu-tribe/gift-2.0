@@ -20,6 +20,7 @@
   },
   "solana": {
     "giftBridgeProgram": "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf",
-    "giftMint": "Fsg5kzL5kJwf9e7ZTq1arzZWGQ4YiRkibXm9vWRY789E"
+    "giftMint": "Fsg5kzL5kJwf9e7ZTq1arzZWGQ4YiRkibXm9vWRY789E",
+    "giftBridgeConfig": "8TbTe9sm2pbyU88sWg5Bs9SarRDGgN2vDE9xUy4AWz87"
   }
 }

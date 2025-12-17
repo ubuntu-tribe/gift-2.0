@@ -5,7 +5,7 @@ import * as path from "path";
 const ROOT = path.resolve(__dirname, "../..");
 const ADDRESSES_PATH = path.join(ROOT, "addresses", "addresses.mainnet.json");
 
-const PROGRAM_ID = "Brdg111111111111111111111111111111111111111";
+const PROGRAM_ID = "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf";
 
 function run(cmd: string) {
   console.log(`\n$ ${cmd}`);

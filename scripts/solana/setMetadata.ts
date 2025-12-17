@@ -1,7 +1,7 @@
 import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import {
   PROGRAM_ID as TOKEN_METADATA_PROGRAM_ID,
-  createCreateMetadataAccountV3Instruction,
+  createUpdateMetadataAccountV2Instruction,
 } from "@metaplex-foundation/mpl-token-metadata";
 import * as fs from "fs";
 import * as path from "path";
@@ -67,30 +67,29 @@ async function main() {
   console.log("Metadata PDA:", metadataPda.toBase58());
   console.log("Payer / update authority:", payer.publicKey.toBase58());
 
-  // Basic on-chain metadata. You can later update the URI to a hosted JSON file.
   const data = {
     name: "GIFT",
     symbol: "GIFT",
-    uri: "https://example.com/gift-metadata.json", // TODO: replace with real metadata JSON URL
+    uri: "ipfs://bafkreicgwbb4wzl4sqcq4dpxeffjoxbtsvpvgwidhs2xsp4gvhjfyds6ge",
     sellerFeeBasisPoints: 0,
     creators: null,
     collection: null,
     uses: null,
   };
 
-  const ix = createCreateMetadataAccountV3Instruction(
+  const ix = createUpdateMetadataAccountV2Instruction(
     {
       metadata: metadataPda,
-      mint,
-      mintAuthority: payer.publicKey,
-      payer: payer.publicKey,
       updateAuthority: payer.publicKey,
     },
     {
-      createMetadataAccountArgsV3: {
-        data,
-        isMutable: true,
-        collectionDetails: null,
+      updateMetadataAccountArgsV2: {
+        // Replace full DataV2 (name, symbol, uri, etc.).
+        data: data as any,
+        // Leave these fields unchanged on-chain.
+        updateAuthority: null,
+        primarySaleHappened: null,
+        isMutable: null,
       },
     }
   );

@@ -29,5 +29,6 @@ accounts/
 
 # Local documentation notes that shouldn't be pushed
 SOLANA_OPS_CONSOLE.md
+solana important.txt
 
 

@@ -20,7 +20,7 @@ import idl from "../../idl/gift_bridge_solana.json";
 //     GIFT_BRIDGE_CONFIG = Config PDA address (created via deployBridgeProgram.ts)
 
 const PROGRAM_ID = new PublicKey(
-  "Brdg111111111111111111111111111111111111111"
+  "EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf"
 );
 
 // IDL type is any here to avoid generating TS types; this keeps things simple.

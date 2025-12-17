@@ -57,7 +57,7 @@ These tests use:
 
 > Note: The Solana tests assume:
 > - The `gift_bridge_solana` program is already deployed with ID
->   `Brdg111111111111111111111111111111111111111`.
+>   `EKAeT88SXnVSFT74MVgYG7tfLKuux271UURqN1FQa5Gf`.
 > - Environment variables are set:
 >   - `ANCHOR_PROVIDER_URL` – RPC URL (e.g. local validator or devnet).
 >   - `ANCHOR_WALLET` – path to a funded keypair JSON file.

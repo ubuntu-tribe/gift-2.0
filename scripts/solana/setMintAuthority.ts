@@ -5,7 +5,6 @@ import {
 } from "@solana/spl-token";
 import * as fs from "fs";
 import * as path from "path";
-import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import dotenv from "dotenv";
 
@@ -31,8 +30,9 @@ function loadPayer(): Keypair {
     return Keypair.fromSecretKey(Uint8Array.from(secret));
   }
 
-  const bytes = bs58.decode(raw.trim());
-  return Keypair.fromSecretKey(bytes);
+  throw new Error(
+    "SOLANA_RELAYER_KEYPAIR must be a path or JSON array; base58 strings are not supported in this script."
+  );
 }
 
 async function main() {
